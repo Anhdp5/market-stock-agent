@@ -1,0 +1,15 @@
+# Credentials — never commit
+.env
+
+# Generated data
+data/
+logs/
+reports/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
