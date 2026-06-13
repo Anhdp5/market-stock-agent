@@ -1,11 +1,8 @@
 """
 IMAP Email Client
 ==================
-Connects to Outlook via IMAP (SSL, port 993) and fetches emails
-from a specified sender. No Azure AD or app registration required —
-just your email address and password (or App Password if MFA is on).
-
-Replaces the previous Microsoft Graph API client.
+Connects to Outlook via IMAP (SSL, port 993).
+No Azure AD or app registration required.
 """
 
 import sys, os
@@ -14,18 +11,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import email
 import imaplib
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from email.header import decode_header
-from email.message import Message
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import config
 
 logger = logging.getLogger(__name__)
 
 
-def _decode_str(value: Optional[str]) -> str:
-    """Decode an encoded email header string to plain text."""
+def _decode_str(value):
     if not value:
         return ""
     parts = decode_header(value)
@@ -38,12 +33,7 @@ def _decode_str(value: Optional[str]) -> str:
     return "".join(result)
 
 
-def _extract_body_and_attachments(msg: Message) -> Dict[str, Any]:
-    """
-    Walk a MIME message and extract:
-      - html_body: HTML content (preferred) or plain text
-      - attachments: list of {name, content (bytes)}
-    """
+def _extract_body_and_attachments(msg):
     html_body   = ""
     plain_body  = ""
     attachments = []
@@ -52,7 +42,6 @@ def _extract_body_and_attachments(msg: Message) -> Dict[str, Any]:
         content_type        = part.get_content_type()
         content_disposition = str(part.get("Content-Disposition", ""))
 
-        # ── Attachment ─────────────────────────────────────────────────────
         if "attachment" in content_disposition or part.get_filename():
             filename = _decode_str(part.get_filename() or "attachment")
             payload  = part.get_payload(decode=True)
@@ -60,14 +49,12 @@ def _extract_body_and_attachments(msg: Message) -> Dict[str, Any]:
                 attachments.append({"name": filename, "content": payload})
             continue
 
-        # ── HTML body ──────────────────────────────────────────────────────
         if content_type == "text/html" and not html_body:
             payload = part.get_payload(decode=True)
             if payload:
-                charset  = part.get_content_charset() or "utf-8"
+                charset   = part.get_content_charset() or "utf-8"
                 html_body = payload.decode(charset, errors="replace")
 
-        # ── Plain text body ────────────────────────────────────────────────
         elif content_type == "text/plain" and not plain_body:
             payload = part.get_payload(decode=True)
             if payload:
@@ -81,7 +68,6 @@ def _extract_body_and_attachments(msg: Message) -> Dict[str, Any]:
 
 
 class IMAPClient:
-    """Thin IMAP wrapper that mimics the interface the email_parser expects."""
 
     def __init__(self):
         if not config.IMAP_PASSWORD:
@@ -89,42 +75,32 @@ class IMAPClient:
                 "IMAP credentials missing. Set IMAP_USER and IMAP_PASSWORD in .env"
             )
 
-    def _connect(self) -> imaplib.IMAP4_SSL:
-        logger.info(f"Connecting to IMAP {config.IMAP_HOST}:{config.IMAP_PORT}")
+    def _connect(self):
+        logger.info("Connecting to IMAP {}:{}".format(config.IMAP_HOST, config.IMAP_PORT))
         conn = imaplib.IMAP4_SSL(config.IMAP_HOST, config.IMAP_PORT)
         conn.login(config.IMAP_USER, config.IMAP_PASSWORD)
         logger.info("IMAP login successful")
         return conn
 
-    def get_emails_from_sender(
-        self,
-        sender_email: str,
-        since_days: int = 35,
-        max_results: int = 200,
-    ) -> List[Dict[str, Any]]:
-        """
-        Return emails from `sender_email` received in the last `since_days` days.
-        Each item contains: id, subject, receivedDateTime, body (dict), hasAttachments.
-        """
-        since_dt  = (datetime.now() - timedelta(days=since_days)).strftime("%d-%b-%Y")
-        search_q  = f'(FROM "{sender_email}" SINCE {since_dt})'
+    def get_emails_from_sender(self, sender_email, since_days=35, max_results=200):
+        since_dt = (datetime.now() - timedelta(days=since_days)).strftime("%d-%b-%Y")
+        search_q = '(FROM "{}" SINCE {})'.format(sender_email, since_dt)
 
         conn = self._connect()
         try:
             conn.select("INBOX", readonly=True)
             status, data = conn.search(None, search_q)
             if status != "OK":
-                logger.warning(f"IMAP search returned status: {status}")
+                logger.warning("IMAP search status: {}".format(status))
                 return []
 
             msg_ids = data[0].split()
             if not msg_ids:
-                logger.info(f"No emails from {sender_email} in last {since_days} days")
+                logger.info("No emails from {} in last {} days".format(sender_email, since_days))
                 return []
 
-            # Fetch newest first, up to max_results
             msg_ids = msg_ids[::-1][:max_results]
-            logger.info(f"Found {len(msg_ids)} emails from {sender_email}")
+            logger.info("Found {} emails from {}".format(len(msg_ids), sender_email))
 
             results = []
             for msg_id in msg_ids:
@@ -133,16 +109,12 @@ class IMAPClient:
                     if status != "OK" or not raw or not raw[0]:
                         continue
 
-                    raw_email = raw[0][1]
-                    msg       = email.message_from_bytes(raw_email)
-
+                    msg      = email.message_from_bytes(raw[0][1])
                     subject  = _decode_str(msg.get("Subject", ""))
-                    from_hdr = _decode_str(msg.get("From", ""))
                     date_hdr = msg.get("Date", "")
 
-                    # Parse date
                     try:
-                        received_dt = email.utils.parsedate_to_datetime(date_hdr)
+                        received_dt  = email.utils.parsedate_to_datetime(date_hdr)
                         received_str = received_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                     except Exception:
                         received_str = date_hdr
@@ -150,4 +122,27 @@ class IMAPClient:
                     body_and_att = _extract_body_and_attachments(msg)
 
                     results.append({
-                        "id":                  msg_id.dec
+                        "id":               msg_id.decode(),
+                        "subject":          subject,
+                        "receivedDateTime": received_str,
+                        "hasAttachments":   len(body_and_att["attachments"]) > 0,
+                        "body":             {"content": body_and_att["html_body"]},
+                        "_attachments":     body_and_att["attachments"],
+                    })
+                except Exception as e:
+                    logger.warning("Failed to parse message {}: {}".format(msg_id, e))
+
+            logger.info("Parsed {} emails".format(len(results)))
+            return results
+
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+
+    def list_attachments(self, message_id):
+        return []
+
+    def get_attachment_content(self, message_id, attachment_id):
+        return b""

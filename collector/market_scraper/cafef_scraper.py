@@ -1,11 +1,9 @@
 """
 Market Data Scraper - CafeF / HOSE
 ====================================
-Collects daily market-wide trading stats for the Vietnamese stock exchange.
-
-Primary source  : vnstock3 (VCI/TCBS backend) → VNINDEX OHLCV + volume
-Secondary source: CafeF s.cafef.vn handler    → order stats (buy/sell volumes)
-Fallback        : CafeF HTML page parsing
+Primary  : vnstock3 (VCI backend) -> VNINDEX OHLCV + volume
+Secondary: CafeF s.cafef.vn handler -> order stats
+Fallback : CafeF HTML page parsing
 """
 
 import sys, os
@@ -30,28 +28,19 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8",
+    "Accept-Language": "vi-VN,vi;q=0.9",
     "Referer": "https://cafef.vn/",
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PRIMARY: vnstock3
-# ─────────────────────────────────────────────────────────────────────────────
-
-def fetch_vnindex_via_vnstock(start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-    """
-    Use vnstock3 to download VNINDEX daily candles.
-    Returns DataFrame with columns: date, close, volume (total market value in B VND).
-    """
+def fetch_vnindex_via_vnstock(start_date, end_date):
     try:
-        from vnstock3 import Vnstock               # noqa: import inside function to avoid hard dep at import time
+        from vnstock3 import Vnstock
         stock = Vnstock().stock("VNINDEX", source="VCI")
         df = stock.trading.history(start=start_date, end=end_date, interval="1D")
         if df is None or df.empty:
             raise ValueError("vnstock returned empty DataFrame")
 
-        # Normalise column names (vnstock may vary between versions)
         df.columns = [c.lower() for c in df.columns]
         rename = {}
         for col in df.columns:
@@ -61,69 +50,55 @@ def fetch_vnindex_via_vnstock(start_date: str, end_date: str) -> Optional[pd.Dat
                 rename[col] = "MarketVolume"
             if col in ("value", "totalvalue", "tradingvalue"):
                 rename[col] = "MarketValueBillion"
-
         df = df.rename(columns=rename)
 
         if "date" not in df.columns:
-            raise ValueError(f"No date column in vnstock result. Columns: {df.columns.tolist()}")
+            raise ValueError("No date column found. Columns: {}".format(df.columns.tolist()))
 
         df["date"] = pd.to_datetime(df["date"]).dt.date
 
-        # volume from vnstock for VNINDEX = total market matched volume (shares)
-        # value = total trading value in billion VND
         if "MarketVolume" not in df.columns and "volume" in df.columns:
             df["MarketVolume"] = df["volume"]
 
-        logger.info(f"vnstock returned {len(df)} rows for {start_date}→{end_date}")
-        return df[["date", "MarketVolume"] + (["MarketValueBillion"] if "MarketValueBillion" in df.columns else [])]
+        logger.info("vnstock returned {} rows for {} -> {}".format(len(df), start_date, end_date))
+        cols = ["date", "MarketVolume"]
+        if "MarketValueBillion" in df.columns:
+            cols.append("MarketValueBillion")
+        return df[cols]
 
     except ImportError:
-        logger.warning("vnstock3 not installed. Run: pip install vnstock3 --break-system-packages")
+        logger.warning("vnstock3 not installed. Run: pip install vnstock3")
         return None
     except Exception as e:
-        logger.warning(f"vnstock fetch failed: {e}")
+        logger.warning("vnstock fetch failed: {}".format(e))
         return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECONDARY: CafeF s.cafef.vn JSON handler
-# ─────────────────────────────────────────────────────────────────────────────
-
-def fetch_cafef_order_stats(start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-    """
-    Fetch market-wide order statistics from CafeF's internal handler.
-    Endpoint: https://s.cafef.vn/Handlers/PagingHandler.ashx/data/2/0/0/0/HOSE/{page}/
-    Returns DataFrame with: date, MarketTransaction, BuyVolume, SellVolume
-    """
-    url_template = (
-        "https://s.cafef.vn/Handlers/PagingHandler.ashx/data/2/0/0/0/HOSE/{page}/"
-    )
+def fetch_cafef_order_stats(start_date, end_date):
+    url_template = "https://s.cafef.vn/Handlers/PagingHandler.ashx/data/2/0/0/0/HOSE/{page}/"
     all_rows = []
     start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
     end_dt   = datetime.strptime(end_date,   "%Y-%m-%d").date()
 
-    for page in range(1, 6):   # up to 5 pages × ~10 rows = 50 days of data
+    for page in range(1, 6):
         try:
-            url = url_template.format(page=page)
+            url  = url_template.format(page=page)
             resp = requests.get(url, headers=HEADERS, timeout=15)
             resp.raise_for_status()
             data = resp.json()
 
-            # CafeF returns {"Data": [...], "TotalCount": N}
             rows = data.get("Data") or data.get("data") or (data if isinstance(data, list) else [])
             if not rows:
                 break
 
             for row in rows:
                 try:
-                    # Key names vary – handle multiple naming conventions
                     raw_date = (
                         row.get("Ngay") or row.get("NgayGiaoDich") or
                         row.get("Date") or row.get("date") or ""
                     )
                     if not raw_date:
                         continue
-                    # Parse Vietnamese date format: "14/04/2026" or ISO
                     if "/" in str(raw_date):
                         row_date = datetime.strptime(raw_date.strip(), "%d/%m/%Y").date()
                     else:
@@ -146,44 +121,35 @@ def fetch_cafef_order_stats(start_date: str, end_date: str) -> Optional[pd.DataF
                     )
 
                     all_rows.append({
-                        "date":               row_date,
-                        "MarketTransaction":  int(transactions),
-                        "BuyVolume":          float(buy_vol),
-                        "SellVolume":         float(sell_vol),
+                        "date":              row_date,
+                        "MarketTransaction": int(transactions),
+                        "BuyVolume":         float(buy_vol),
+                        "SellVolume":        float(sell_vol),
                     })
-                except Exception as parse_err:
-                    logger.debug(f"Row parse error: {parse_err} | row: {row}")
+                except Exception as e:
+                    logger.debug("Row parse error: {} | row: {}".format(e, row))
 
             time.sleep(0.3)
 
         except Exception as e:
-            logger.warning(f"CafeF order stats page {page} failed: {e}")
+            logger.warning("CafeF order stats page {} failed: {}".format(page, e))
             break
 
     if all_rows:
         df = pd.DataFrame(all_rows).drop_duplicates("date").sort_values("date")
-        logger.info(f"CafeF order stats: {len(df)} rows")
+        logger.info("CafeF order stats: {} rows".format(len(df)))
         return df
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FALLBACK: CafeF HTML scraper for historical market data
-# ─────────────────────────────────────────────────────────────────────────────
-
-def fetch_cafef_html_history(start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-    """
-    Scrape market history table from CafeF's historical data page.
-    URL: https://cafef.vn/du-lieu/lich-su-giao-dich/hose/all-1.chn
-    """
+def fetch_cafef_html_history(start_date, end_date):
     all_rows = []
     start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
     end_dt   = datetime.strptime(end_date,   "%Y-%m-%d").date()
 
-    # Build date-filtered URL
     url = (
-        f"https://cafef.vn/du-lieu/lich-su-giao-dich/hose/all-1.chn"
-        f"?startDate={start_date}&endDate={end_date}"
+        "https://cafef.vn/du-lieu/lich-su-giao-dich/hose/all-1.chn"
+        "?startDate={}&endDate={}".format(start_date, end_date)
     )
 
     try:
@@ -198,7 +164,7 @@ def fetch_cafef_html_history(start_date: str, end_date: str) -> Optional[pd.Data
             logger.warning("CafeF HTML: target table not found")
             return None
 
-        rows = table.find_all("tr")[1:]   # skip header
+        rows = table.find_all("tr")[1:]
         for row in rows:
             cells = [td.get_text(strip=True) for td in row.find_all("td")]
             if len(cells) < 5:
@@ -207,62 +173,50 @@ def fetch_cafef_html_history(start_date: str, end_date: str) -> Optional[pd.Data
                 row_date = datetime.strptime(cells[0], "%d/%m/%Y").date()
                 if not (start_dt <= row_date <= end_dt):
                     continue
-                # Typical columns: Date | Close | Volume (matched) | Value | Open | High | Low
                 vol_str = cells[2].replace(",", "").replace(".", "")
                 all_rows.append({
-                    "date":          row_date,
-                    "MarketVolume":  float(vol_str) if vol_str else 0,
+                    "date":         row_date,
+                    "MarketVolume": float(vol_str) if vol_str else 0,
                 })
             except Exception:
                 continue
 
         if all_rows:
             df = pd.DataFrame(all_rows).drop_duplicates("date").sort_values("date")
-            logger.info(f"CafeF HTML fallback: {len(df)} rows")
+            logger.info("CafeF HTML fallback: {} rows".format(len(df)))
             return df
 
     except Exception as e:
-        logger.warning(f"CafeF HTML scrape failed: {e}")
+        logger.warning("CafeF HTML scrape failed: {}".format(e))
 
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN collector function
-# ─────────────────────────────────────────────────────────────────────────────
-
-def collect_market_data(
-    lookback_days: int = config.LOOKBACK_DAYS,
-    end_date: Optional[date] = None,
-) -> pd.DataFrame:
+def collect_market_data(lookback_days=None, end_date=None):
     """
-    Collect and merge market data from available sources.
-    Returns a unified DataFrame with schema:
-        date | MarketTransaction | MarketVolume | BuyVolume | SellVolume
+    Collect market data from available sources.
 
     Parameters
     ----------
-    lookback_days : How many calendar days back from end_date to collect.
-    end_date      : Last date to collect (defaults to today).
+    lookback_days : Calendar days back from end_date (default: config.LOOKBACK_DAYS)
+    end_date      : Last date to collect (default: today)
     """
-    end_dt   = end_date or date.today()
-    start_dt = end_dt - timedelta(days=lookback_days)
+    if lookback_days is None:
+        lookback_days = config.LOOKBACK_DAYS
+
+    end_dt    = end_date or date.today()
+    start_dt  = end_dt - timedelta(days=lookback_days)
     start_str = start_dt.strftime("%Y-%m-%d")
     end_str   = end_dt.strftime("%Y-%m-%d")
 
-    logger.info(f"Collecting market data {start_str} → {end_str}")
+    logger.info("Collecting market data {} -> {}".format(start_str, end_str))
 
-    # ── 1. Get VNINDEX volume via vnstock ──────────────────────────────────
     df_vnstock = fetch_vnindex_via_vnstock(start_str, end_str)
+    df_orders  = fetch_cafef_order_stats(start_str, end_str)
 
-    # ── 2. Get order stats (transactions, buy/sell) via CafeF handler ──────
-    df_orders = fetch_cafef_order_stats(start_str, end_str)
-
-    # ── 3. Fallback: HTML scraper for volume if vnstock failed ─────────────
     if df_vnstock is None:
         df_vnstock = fetch_cafef_html_history(start_str, end_str)
 
-    # ── Merge results ──────────────────────────────────────────────────────
     if df_vnstock is not None and df_orders is not None:
         df = df_vnstock.merge(df_orders, on="date", how="outer")
     elif df_vnstock is not None:
@@ -274,15 +228,22 @@ def collect_market_data(
         df = df_orders.copy()
         df["MarketVolume"] = None
     else:
-        logger.error("All data sources failed. Returning empty DataFrame.")
+        logger.error("All data sources failed.")
         return pd.DataFrame(columns=[
             "date", "MarketTransaction", "MarketVolume", "BuyVolume", "SellVolume"
         ])
 
-    # Ensure all required columns exist
     for col in ["MarketTransaction", "MarketVolume", "BuyVolume", "SellVolume"]:
         if col not in df.columns:
             df[col] = None
 
     df = df[["date", "MarketTransaction", "MarketVolume", "BuyVolume", "SellVolume"]]
-    df = df.sort_values("date").reset_index(drop=True
+    df = df.sort_values("date").reset_index(drop=True)
+    logger.info("Market data collected: {} records".format(len(df)))
+    return df
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    df = collect_market_data()
+    print(df.tail(10).to_string())
