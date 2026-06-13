@@ -190,3 +190,25 @@ def run_pipeline_range(
     for i, run_date in enumerate(days, 1):
         logger.info(f"\n[{i}/{len(days)}] Processing {run_date}")
         path = run_p
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scheduler daemon
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _scheduled_job():
+    tz  = pytz.timezone(config.TIMEZONE)
+    now = datetime.now(tz)
+    logger.info("Scheduled trigger at {}".format(now.strftime("%Y-%m-%d %H:%M %Z")))
+    run_pipeline(dry_run=False)
+
+
+def start_scheduler():
+    """Start the daily scheduler daemon — blocks forever."""
+    hour, minute = config.REPORT_TIME.split(":")
+    job_time     = "{:02d}:{:02d}".format(int(hour), int(minute))
+    logger.info("Scheduler starting — daily at {} {}".format(job_time, config.TIMEZONE))
+    schedule.every().day.at(job_time).do(_scheduled_job)
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
