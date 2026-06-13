@@ -232,14 +232,20 @@ def fetch_cafef_html_history(start_date: str, end_date: str) -> Optional[pd.Data
 # ─────────────────────────────────────────────────────────────────────────────
 
 def collect_market_data(
-    lookback_days: int = config.LOOKBACK_DAYS
+    lookback_days: int = config.LOOKBACK_DAYS,
+    end_date: Optional[date] = None,
 ) -> pd.DataFrame:
     """
     Collect and merge market data from available sources.
     Returns a unified DataFrame with schema:
         date | MarketTransaction | MarketVolume | BuyVolume | SellVolume
+
+    Parameters
+    ----------
+    lookback_days : How many calendar days back from end_date to collect.
+    end_date      : Last date to collect (defaults to today).
     """
-    end_dt   = date.today()
+    end_dt   = end_date or date.today()
     start_dt = end_dt - timedelta(days=lookback_days)
     start_str = start_dt.strftime("%Y-%m-%d")
     end_str   = end_dt.strftime("%Y-%m-%d")
@@ -279,13 +285,4 @@ def collect_market_data(
             df[col] = None
 
     df = df[["date", "MarketTransaction", "MarketVolume", "BuyVolume", "SellVolume"]]
-    df = df.sort_values("date").reset_index(drop=True)
-
-    logger.info(f"Market data collected: {len(df)} records")
-    return df
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    df = collect_market_data()
-    print(df.tail(10).to_string())
+    df = df.sort_values("date").reset_index(drop=True

@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import logging
 from datetime import date, timedelta
 from typing import Dict, Optional
+from datetime import date as _date_type  # avoid shadowing built-in date
 
 import pandas as pd
 
@@ -55,6 +56,7 @@ def normalise(
     market_df: Optional[pd.DataFrame],
     zlp_data:  Dict[str, pd.DataFrame],
     lookback_days: int = config.LOOKBACK_DAYS,
+    end_date: Optional[date] = None,
 ) -> pd.DataFrame:
     """
     Merge market + ZLP data onto a trading-day spine.
@@ -64,12 +66,13 @@ def normalise(
     market_df   : DataFrame from market scraper (date, MarketTransaction, MarketVolume, BuyVolume, SellVolume)
     zlp_data    : Dict of metric_key → DataFrame (date, <metric_key>)
     lookback_days: How many calendar days back to build the spine
+    end_date    : Last date of the spine (defaults to today)
 
     Returns
     -------
     Unified daily DataFrame with all columns.
     """
-    end_dt   = date.today()
+    end_dt   = end_date or date.today()
     start_dt = end_dt - timedelta(days=lookback_days)
 
     # ── Build spine ────────────────────────────────────────────────────────
@@ -126,7 +129,4 @@ def normalise(
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    spine = build_trading_day_spine(date(2026, 5, 1), date(2026, 6, 13))
-    print(f"Trading days May-Jun 2026: {len(spine)}")
-    print(spine.tail(10).to_string())
+    logging.basicConfig(le
