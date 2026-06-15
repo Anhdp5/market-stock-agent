@@ -17,10 +17,15 @@ import config
 
 logger = logging.getLogger(__name__)
 
+# All columns the DB cares about (excluding 'date')
 METRIC_COLUMNS = [
-    "MarketTransaction", "MarketVolume", "BuyVolume", "SellVolume",
-    "ZLPNewAccount", "ZLPTradingTransaction", "ZLPTradingVolume",
-    "ZLPActiveUsers", "ZLPTransactionbyusersegment",
+    # Market
+    "MarketVolume", "MarketValue", "BuyVolume", "SellVolume",
+    "MarketOrderCount", "MarketBuyOrders", "MarketSellOrders",
+    # ZLP
+    "ZLPNewAccount", "ZLPTransaction", "ZLPValue",
+    "ZLPActiveUsers", "ZLPActiveSellUsers", "ZLPActiveBuyUsers",
+    "ZLPActiveUsersMonthly",
 ]
 
 
@@ -71,29 +76,41 @@ def normalise(market_df, zlp_data, lookback_days=None, end_date=None):
         unified = unified.merge(market_df, on="date", how="left")
         logger.info("Merged market data: {} unique dates".format(market_df["date"].nunique()))
     else:
-        for col in ["MarketTransaction", "MarketVolume", "BuyVolume", "SellVolume"]:
+        for col in ["MarketVolume", "MarketValue", "BuyVolume", "SellVolume",
+                    "MarketOrderCount", "MarketBuyOrders", "MarketSellOrders"]:
             unified[col] = None
 
-    # Merge ZLP metrics
-    for metric_key, metric_df in zlp_data.items():
+    # Merge ZLP metrics - each metric_key is a separate DataFrame
+    for metric_key, metric_df in (zlp_data or {}).items():
+        # Skip multi-column segment table (not stored in main table)
+        if metric_key == "ZLPTransactionBySegment":
+            continue
         if metric_df is None or metric_df.empty:
             unified[metric_key] = None
             continue
         metric_df = metric_df.copy()
         metric_df["date"] = pd.to_datetime(metric_df["date"]).dt.date
-        metric_df = metric_df[metric_df["date"].apply(_is_trading_day)]
+
+        # Monthly data: allow non-trading days, forward-fill after merge
+        if metric_key != "ZLPActiveUsersMonthly":
+            metric_df = metric_df[metric_df["date"].apply(_is_trading_day)]
+
+        if metric_key not in metric_df.columns:
+            logger.warning("metric_key '{}' not found as column in its own DataFrame".format(metric_key))
+            continue
+
         metric_df = metric_df[["date", metric_key]].drop_duplicates("date")
         unified = unified.merge(metric_df, on="date", how="left")
         logger.info("Merged {}: {} unique dates".format(metric_key, metric_df["date"].nunique()))
 
-    # Ensure all columns present
+    # Ensure all expected columns present
     for col in METRIC_COLUMNS:
         if col not in unified.columns:
             unified[col] = None
 
-    # Forward-fill ZLPActiveUsers (monthly -> daily)
-    if "ZLPActiveUsers" in unified.columns:
-        unified["ZLPActiveUsers"] = unified["ZLPActiveUsers"].ffill()
+    # Forward-fill monthly active users to fill trading days
+    if "ZLPActiveUsersMonthly" in unified.columns:
+        unified["ZLPActiveUsersMonthly"] = unified["ZLPActiveUsersMonthly"].ffill()
 
     unified = unified.sort_values("date").reset_index(drop=True)
     logger.info("Normalised: {} rows".format(len(unified)))

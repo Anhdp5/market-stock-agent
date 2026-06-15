@@ -4,7 +4,7 @@ Analytics Calculator
 For each metric computes:
   - Latest value (D0)
   - Previous day value (D-1)
-  - D1 vs D0 change %
+  - D0 vs D1 change %
   - 7-day average
   - Current vs 7-day average %
   - WoW (week-over-week) growth %
@@ -24,24 +24,34 @@ import config
 
 logger = logging.getLogger(__name__)
 
-ANALYSIS_WINDOW = config.ANALYSIS_WINDOW   # 7 trading days
+ANALYSIS_WINDOW   = config.ANALYSIS_WINDOW     # 7 trading days (rolling average)
+WEEK_TRADING_DAYS = config.WEEK_TRADING_DAYS   # 5 trading days = one trading week
 
 METRIC_LABELS = {
-    "MarketTransaction":           "Market Matched Orders",
-    "MarketVolume":                "Market Trading Volume",
-    "BuyVolume":                   "Market Buy Volume",
-    "SellVolume":                  "Market Sell Volume",
-    "ZLPNewAccount":               "ZLP New Accounts",
-    "ZLPTradingTransaction":       "ZLP Matched Orders",
-    "ZLPTradingVolume":            "ZLP Trading Value",
-    "ZLPActiveUsers":              "ZLP Active Users",
-    "ZLPTransactionbyusersegment": "ZLP Orders by Segment",
+    "MarketVolume":       "Market Trading Volume",
+    "MarketValue":        "Market Trading Value (B VND)",
+    "BuyVolume":          "Market Buy Volume",
+    "SellVolume":         "Market Sell Volume",
+    "MarketOrderCount":   "Market Orders",
+    "MarketBuyOrders":    "Market Buy Orders",
+    "MarketSellOrders":   "Market Sell Orders",
+    "ZLPNewAccount":      "ZLP New Accounts",
+    "ZLPTransaction":     "ZLP Orders",
+    "ZLPValue":           "ZLP Trading Value (B VND)",
+    "ZLPActiveUsers":     "ZLP Active Users",
+    "ZLPActiveSellUsers": "ZLP Active Sell Users",
+    "ZLPActiveBuyUsers":  "ZLP Active Buy Users",
+    "ZLPActiveUsersMonthly": "ZLP Monthly Active Users",
 }
 
-MARKET_METRICS = ["MarketTransaction", "MarketVolume", "BuyVolume", "SellVolume"]
-ZLP_METRICS    = [
-    "ZLPNewAccount", "ZLPTradingTransaction", "ZLPTradingVolume",
-    "ZLPActiveUsers", "ZLPTransactionbyusersegment",
+MARKET_METRICS = [
+    "MarketVolume", "MarketValue", "BuyVolume", "SellVolume",
+    "MarketOrderCount", "MarketBuyOrders", "MarketSellOrders",
+]
+ZLP_METRICS = [
+    "ZLPNewAccount", "ZLPTransaction", "ZLPValue",
+    "ZLPActiveUsers", "ZLPActiveSellUsers", "ZLPActiveBuyUsers",
+    "ZLPActiveUsersMonthly",
 ]
 
 
@@ -69,10 +79,6 @@ def _trend(series: pd.Series) -> str:
 
 
 def compute_metric_stats(series: pd.Series) -> Dict[str, Any]:
-    """
-    Given a time-ordered Series of daily values (NaN for missing),
-    return a stats dict.
-    """
     clean = series.dropna()
     if clean.empty:
         return {
@@ -82,42 +88,50 @@ def compute_metric_stats(series: pd.Series) -> Dict[str, Any]:
             "available_days": 0,
         }
 
-    d0  = clean.iloc[-1]   if len(clean) >= 1 else None
-    d1  = clean.iloc[-2]   if len(clean) >= 2 else None
+    d0  = clean.iloc[-1] if len(clean) >= 1 else None
+    d1  = clean.iloc[-2] if len(clean) >= 2 else None
     d7  = clean.tail(ANALYSIS_WINDOW)
-    avg = d7.mean()        if len(d7) >= 1 else None
+    avg = d7.mean()      if len(d7) >= 1 else None
 
-    # WoW: compare this week's average vs previous week's average
-    prev_week = clean.iloc[-(ANALYSIS_WINDOW * 2):-(ANALYSIS_WINDOW)] if len(clean) >= ANALYSIS_WINDOW * 2 else pd.Series(dtype=float)
-    wow_pct   = _pct_change(avg, prev_week.mean()) if not prev_week.empty and avg is not None else None
+    # ── Week-over-week ────────────────────────────────────────────────────
+    # A trading week is 5 days (markets are closed on weekends), so two weeks
+    # is 10 trading days — NOT 14. WoW compares the average of the last 5
+    # trading days against the 5 trading days before that.
+    #   (The old code required ANALYSIS_WINDOW*2 = 14 points, which a full
+    #    two trading weeks never reaches, leaving WoW permanently empty.)
+    week = WEEK_TRADING_DAYS
+    n    = len(clean)
+    if n >= 2 * week:
+        recent_block = clean.iloc[-week:]
+        prior_block  = clean.iloc[-2 * week:-week]
+        wow_pct = _pct_change(recent_block.mean(), prior_block.mean())
+    elif n >= 4:
+        # Less than two full trading weeks loaded: fall back to a symmetric
+        # half-split (min 2 days per block) so sparse metrics still yield a WoW.
+        block = n // 2
+        wow_pct = _pct_change(clean.iloc[-block:].mean(),
+                              clean.iloc[-2 * block:-block].mean())
+    else:
+        wow_pct = None
 
     return {
-        "d0":           round(d0,  2) if d0  is not None else None,
-        "d1":           round(d1,  2) if d1  is not None else None,
-        "d0_vs_d1_pct": _pct_change(d0, d1),
-        "avg_7d":       round(avg, 2) if avg is not None else None,
-        "d0_vs_avg_pct":_pct_change(d0, avg),
-        "wow_pct":      wow_pct,
-        "trend":        _trend(series.tail(ANALYSIS_WINDOW)),
+        "d0":            round(d0,  2) if d0  is not None else None,
+        "d1":            round(d1,  2) if d1  is not None else None,
+        "d0_vs_d1_pct":  _pct_change(d0, d1),
+        "avg_7d":        round(avg, 2) if avg is not None else None,
+        "d0_vs_avg_pct": _pct_change(d0, avg),
+        "wow_pct":       wow_pct,
+        "trend":         _trend(series.tail(ANALYSIS_WINDOW)),
         "available_days": len(clean),
     }
 
 
 def run_analysis(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
-    """
-    Run all metric calculations on a unified daily DataFrame.
-
-    Returns
-    -------
-    analysis : dict keyed by metric name, value is stats dict plus label.
-    """
     if df is None or df.empty:
         logger.error("Empty DataFrame passed to analytics engine")
         return {}
 
     df = df.sort_values("date").reset_index(drop=True)
-
-    # Take the last 2 × ANALYSIS_WINDOW trading days for calculations
     window_df = df.tail(ANALYSIS_WINDOW * 2)
 
     analysis: Dict[str, Dict[str, Any]] = {}
@@ -140,20 +154,19 @@ def run_analysis(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
-    # Quick smoke test with synthetic data
     import numpy as np
     dates = pd.bdate_range("2026-05-01", periods=20)
     synthetic = pd.DataFrame({
-        "date":                  [d.date() for d in dates],
-        "MarketVolume":          np.random.randint(8000, 15000, 20).astype(float),
-        "MarketTransaction":     np.random.randint(300000, 600000, 20).astype(float),
-        "BuyVolume":             np.random.randint(4000, 8000, 20).astype(float),
-        "SellVolume":            np.random.randint(4000, 8000, 20).astype(float),
-        "ZLPTradingTransaction": np.random.randint(500, 2000, 20).astype(float),
-        "ZLPTradingVolume":      np.random.randint(5e9, 2e10, 20).astype(float),
-        "ZLPNewAccount":         np.random.randint(100, 500, 20).astype(float),
-        "ZLPActiveUsers":        np.random.randint(5000, 8000, 20).astype(float),
-        "ZLPTransactionbyusersegment": np.random.randint(500, 2000, 20).astype(float),
+        "date":             [d.date() for d in dates],
+        "MarketVolume":     np.random.randint(8000, 15000, 20).astype(float),
+        "MarketValue":      np.random.uniform(10, 20, 20),
+        "BuyVolume":        np.random.randint(4000, 8000, 20).astype(float),
+        "SellVolume":       np.random.randint(4000, 8000, 20).astype(float),
+        "ZLPTransaction":   np.random.randint(500, 2000, 20).astype(float),
+        "ZLPNewAccount":    np.random.randint(100, 500, 20).astype(float),
+        "ZLPActiveUsers":   np.random.randint(5000, 8000, 20).astype(float),
+        "ZLPActiveSellUsers": np.random.randint(1000, 3000, 20).astype(float),
+        "ZLPActiveBuyUsers":  np.random.randint(1000, 3000, 20).astype(float),
     })
     result = run_analysis(synthetic)
     for k, v in result.items():
