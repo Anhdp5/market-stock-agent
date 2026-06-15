@@ -156,6 +156,27 @@ def _section_header(title: str) -> str:
                border-bottom:2px solid #e0e7ff;padding-bottom:8px;">{title}</h2>"""
 
 
+def _cmp_like(name: str, zlp_stats: Dict[str, Any], mkt_stats: Dict[str, Any]) -> str:
+    """Like-for-like WoW comparison (e.g. ZLP Orders vs Market Orders)."""
+    z = (zlp_stats or {}).get("wow_pct")
+    m = (mkt_stats or {}).get("wow_pct")
+    if z is None and m is None:
+        return f"<b>{name}:</b> insufficient WoW data."
+    if z is None:
+        return f"<b>{name}:</b> market {_arrow_text(m)} WoW; ZLP {name.lower()} data insufficient."
+    if m is None:
+        return f"<b>{name}:</b> ZLP {_arrow_text(z)} WoW; market {name.lower()} data insufficient."
+    gap = z - m
+    if gap > 2:
+        verdict = "outpacing the market"
+    elif gap < -2:
+        verdict = "lagging the market"
+    else:
+        verdict = "in line with the market"
+    return (f"<b>{name}:</b> ZaloPay {verdict} — ZLP {_arrow_text(z)} WoW vs "
+            f"market {_arrow_text(m)} ({gap:+.1f} pp).")
+
+
 def _build_exec_summary(
     analysis:    Dict[str, Dict[str, Any]],
     bench_table: List[Dict[str, Any]],
@@ -171,30 +192,14 @@ def _build_exec_summary(
     zlp_au  = analysis.get("ZLPActiveUsers", {})
     zlp_na  = analysis.get("ZLPNewAccount", {})
 
-    tx_bench = next((r for r in bench_table if r.get("zlp_key") == "ZLPTransaction"), {})
-
-    # Q1: ZLP vs market speed
-    mkt_wow = mkt_vol.get("wow_pct")
-    zlp_wow = zlp_tx.get("wow_pct")
-    if mkt_wow is not None and zlp_wow is not None:
-        gap = zlp_wow - mkt_wow
-        if gap > 2:
-            q1 = (f"ZaloPay is <b>outpacing the market</b>: ZLP orders "
-                  f"{_arrow_text(zlp_wow)} WoW vs market volume {_arrow_text(mkt_wow)} "
-                  f"(+{gap:.1f} pp advantage).")
-        elif gap < -2:
-            q1 = (f"ZaloPay is <b>lagging the market</b>: ZLP orders "
-                  f"{_arrow_text(zlp_wow)} WoW vs market volume {_arrow_text(mkt_wow)} "
-                  f"({gap:.1f} pp gap).")
-        else:
-            q1 = (f"ZaloPay is <b>tracking the market</b>: ZLP orders "
-                  f"{_arrow_text(zlp_wow)} WoW, market {_arrow_text(mkt_wow)} "
-                  f"({gap:+.1f} pp — broadly in line).")
-    elif mkt_wow is not None:
-        q1 = (f"Market volume {_arrow_text(mkt_wow)} WoW. "
-              "ZLP order data insufficient for comparison.")
-    else:
-        q1 = "Insufficient WoW data for Market vs ZLP comparison this period."
+    # Q1: like-for-like WoW vs market — Orders vs Orders, Value vs Value
+    q1_orders = _cmp_like("Orders",
+                          analysis.get("ZLPTransaction", {}),
+                          analysis.get("MarketOrderCount", {}))
+    q1_value  = _cmp_like("Value",
+                          analysis.get("ZLPValue", {}),
+                          analysis.get("MarketValue", {}))
+    q1 = q1_orders + "<br>" + q1_value
 
     # Q2: Market-driven vs internal
     mkt_trend = mkt_vol.get("trend", "insufficient_data")
