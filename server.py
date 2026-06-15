@@ -157,6 +157,128 @@ async def report_route(request):
 app.add_route("/report", report_route, methods=["GET"])
 
 
+# ── Browser landing page at GET / ───────────────────────────────────────────
+_INDEX_HTML = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZaloPay · Stock Intelligence</title>
+<style>
+ :root{--zp:#0068ff;--zp2:#00b9f1;--ink:#0b1f3a;--mut:#5b6b85;--bg:#eef3fb;--line:#e3eaf5;--ok:#16a34a;--warn:#d97706;--err:#dc2626}
+ *{box-sizing:border-box} body{margin:0;font-family:'Segoe UI',Roboto,Arial,sans-serif;background:var(--bg);color:var(--ink)}
+ .top{background:linear-gradient(120deg,#0050d8 0%,var(--zp) 45%,var(--zp2) 100%);color:#fff;padding:0}
+ .bar{max-width:1000px;margin:0 auto;display:flex;align-items:center;gap:12px;padding:16px 20px}
+ .logo{width:40px;height:40px;border-radius:11px;background:#fff;display:grid;place-items:center;font-weight:900;color:var(--zp);font-size:22px;box-shadow:0 4px 14px rgba(0,0,0,.18)}
+ .brand b{font-size:18px;letter-spacing:.2px} .brand div{font-size:12px;opacity:.9}
+ .live{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:13px;background:rgba(255,255,255,.16);padding:6px 12px;border-radius:999px}
+ .dot{width:9px;height:9px;border-radius:50%;background:#9aa7bd} .dot.on{background:#37e07a;box-shadow:0 0 0 4px rgba(55,224,122,.25)}
+ .hero{max-width:1000px;margin:0 auto;padding:18px 20px 6px} .hero h1{font-size:22px;margin:6px 0} .hero p{color:var(--mut);margin:0;font-size:14px}
+ .wrap{max-width:1000px;margin:0 auto;padding:14px 20px 40px;display:grid;grid-template-columns:340px 1fr;gap:18px}
+ @media(max-width:820px){.wrap{grid-template-columns:1fr}}
+ .card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px;box-shadow:0 6px 24px rgba(16,42,90,.06)}
+ .card h3{margin:0 0 12px;font-size:15px;color:var(--zp)}
+ label{display:block;font-size:12px;font-weight:600;color:var(--mut);margin:12px 0 5px;text-transform:uppercase;letter-spacing:.04em}
+ input[type=date],input[type=text]{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:14px;background:#fbfdff}
+ .row{display:flex;align-items:center;gap:9px;margin:10px 0;font-size:14px;font-weight:500;color:var(--ink)}
+ .switch{position:relative;width:42px;height:24px;flex:0 0 auto} .switch input{opacity:0;width:0;height:0}
+ .sl{position:absolute;inset:0;background:#cbd6ea;border-radius:999px;transition:.2s} .sl:before{content:'';position:absolute;width:18px;height:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+ .switch input:checked+.sl{background:var(--zp)} .switch input:checked+.sl:before{transform:translateX(18px)}
+ .btn{width:100%;border:0;border-radius:12px;padding:13px;font-size:15px;font-weight:700;cursor:pointer;margin-top:14px;transition:.15s}
+ .btn.primary{background:linear-gradient(120deg,var(--zp),var(--zp2));color:#fff;box-shadow:0 8px 20px rgba(0,104,255,.32)} .btn.primary:hover{filter:brightness(1.05)}
+ .btn.ghost{background:#eef3fb;color:var(--zp)} .btn:disabled{opacity:.55;cursor:not-allowed}
+ .btns2{display:flex;gap:10px} .btns2 .btn{margin-top:10px}
+ .status{display:flex;align-items:center;gap:10px;font-size:14px;margin-top:6px}
+ .pill{font-size:12px;font-weight:700;padding:4px 11px;border-radius:999px}
+ .pill.idle{background:#eef1f6;color:#64748b}.pill.running{background:#e0edff;color:var(--zp)}.pill.succeeded{background:#dcfce7;color:var(--ok)}.pill.failed{background:#fee2e2;color:var(--err)}
+ .spin{width:15px;height:15px;border:2.5px solid #cfe0ff;border-top-color:var(--zp);border-radius:50%;animation:s .8s linear infinite;display:none}@keyframes s{to{transform:rotate(360deg)}}
+ .meta{font-size:12px;color:var(--mut);margin-top:8px;line-height:1.6}
+ .repwrap{padding:0;overflow:hidden;display:flex;flex-direction:column;min-height:520px}
+ .rephead{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)} .rephead h3{margin:0}
+ .open{margin-left:auto;font-size:13px;color:var(--zp);text-decoration:none;font-weight:600}
+ iframe{border:0;width:100%;flex:1;min-height:520px;background:#fff}
+ .empty{flex:1;display:grid;place-items:center;color:var(--mut);text-align:center;padding:30px;font-size:14px}
+ .chip{display:inline-block;background:#eef3fb;color:var(--zp);font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;margin-top:6px}
+ .foot{max-width:1000px;margin:0 auto;padding:0 20px 30px;color:var(--mut);font-size:12px}
+</style></head><body>
+<div class="top"><div class="bar">
+  <div class="logo">Z</div>
+  <div class="brand"><b>ZaloPay</b><div>Stock Intelligence</div></div>
+  <div class="live"><span class="dot" id="hdot"></span><span id="htxt">checking…</span></div>
+</div></div>
+
+<div class="hero">
+  <h1>Daily Market Intelligence</h1>
+  <p>Market vs ZaloPay performance, analysed and summarised by <b>Qwen</b>. Runs on demand here, and automatically every day at 08:00 (VN).</p>
+</div>
+
+<div class="wrap">
+  <div class="card">
+    <h3>⚙️ Generate a report</h3>
+    <label>Report date</label>
+    <input type="date" id="date">
+    <div class="row"><label class="switch"><input type="checkbox" id="dry" checked><span class="sl"></span></label> Dry run <span style="color:var(--mut);font-weight:400">(don't send email)</span></div>
+    <div class="row"><label class="switch"><input type="checkbox" id="force" checked><span class="sl"></span></label> Force <span style="color:var(--mut);font-weight:400">(run on holidays/weekends)</span></div>
+    <button class="btn primary" id="runbtn" onclick="run()">▶  Run pipeline</button>
+    <div class="btns2"><button class="btn ghost" onclick="refresh()">↻ Status</button><button class="btn ghost" onclick="loadReport()">📄 View report</button></div>
+    <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
+    <div class="status"><div class="spin" id="spin"></div><span class="pill idle" id="pill">idle</span></div>
+    <div class="meta" id="meta">No run yet. Pick a date and press <b>Run pipeline</b>.</div>
+  </div>
+
+  <div class="card repwrap">
+    <div class="rephead"><h3>📈 Report</h3><a class="open" id="open" href="#" target="_blank" style="display:none">Open in new tab ↗</a></div>
+    <div class="empty" id="empty">Your generated report will appear here.<br><span class="chip">tip: run a date, then it loads automatically</span></div>
+    <iframe id="rep" style="display:none"></iframe>
+  </div>
+</div>
+<div class="foot">Powered by GreenNode AgentBase · Insights by Qwen 3.5 · Endpoints: <code>/health</code> · <code>/invocations</code> · <code>/report</code></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let pollTimer=null;
+function setPill(s){const p=$('pill');p.className='pill '+s;p.textContent=s;$('spin').style.display=(s==='running')?'inline-block':'none';}
+async function post(b){const r=await fetch('/invocations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json();}
+function fmt(t){return t?new Date(t).toLocaleString():'—';}
+async function health(){try{const r=await fetch('/health');const ok=r.ok;$('hdot').className='dot'+(ok?' on':'');$('htxt').textContent=ok?'live':'down';}catch(e){$('hdot').className='dot';$('htxt').textContent='down';}}
+function dateVal(){return $('date').value||undefined;}
+async function run(){
+  $('runbtn').disabled=true;setPill('running');$('meta').textContent='Starting pipeline… this takes ~2–3 minutes (scrape → analyse → Qwen → report).';
+  try{const r=await post({date:dateVal(),dry_run:$('dry').checked,force:$('force').checked});
+    if(r.status==='busy'){$('meta').textContent='A run is already in progress — watching it.';}
+    startPoll();
+  }catch(e){setPill('failed');$('meta').textContent='Error: '+e;$('runbtn').disabled=false;}
+}
+function startPoll(){clearInterval(pollTimer);pollTimer=setInterval(refresh,6000);refresh();}
+async function refresh(){
+  try{const r=await post({action:'status'});const lr=r.last_run||{};setPill(lr.state||'idle');
+    let m='State: <b>'+(lr.state||'idle')+'</b>';
+    if(lr.started_at)m+=' · started '+fmt(lr.started_at);
+    if(lr.finished_at)m+=' · finished '+fmt(lr.finished_at);
+    if(lr.error)m+='<br><span style="color:var(--err)">'+lr.error+'</span>';
+    if(lr.result&&lr.result.report)m+='<br>Report: '+lr.result.report;
+    $('meta').innerHTML=m;
+    if(lr.state==='succeeded'||lr.state==='failed'){clearInterval(pollTimer);$('runbtn').disabled=false;if(lr.state==='succeeded')loadReport();}
+  }catch(e){}
+}
+async function loadReport(){
+  const d=dateVal();const url='/report'+(d?('?date='+encodeURIComponent(d)):'');
+  try{const r=await fetch(url);if(!r.ok){$('empty').innerHTML='No report for this date yet. Run the pipeline first.';return;}
+    const html=await r.text();const f=$('rep');f.srcdoc=html;f.style.display='block';$('empty').style.display='none';
+    const o=$('open');o.href=url;o.style.display='inline';
+  }catch(e){$('empty').textContent='Could not load report: '+e;}
+}
+// init: default date = today, check health, load latest report if any
+(function(){const t=new Date();$('date').value=t.toISOString().slice(0,10);health();setInterval(health,15000);refresh();})();
+</script>
+</body></html>"""
+
+
+async def index_route(request):
+    return HTMLResponse(_INDEX_HTML)
+
+
+app.add_route("/", index_route, methods=["GET"])
+
+
 # ── Daily scheduler thread ──────────────────────────────────────────────────
 def _scheduler_loop():
     """Run the pipeline daily at REPORT_TIME (container-local = VN time)."""
