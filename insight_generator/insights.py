@@ -9,17 +9,20 @@ Applies consulting-style logic to produce:
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+import json
 import logging
 from typing import Dict, Any, List, Optional, Tuple
+
+from insight_generator import llm_client
 
 logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Insight generation rules
+# Rule-based insight generation (fallback when the LLM is unavailable)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_insights(
+def _rule_based_insights(
     analysis:    Dict[str, Dict[str, Any]],
     bench_table: List[Dict[str, Any]],
 ) -> List[Dict[str, str]]:
@@ -122,8 +125,8 @@ def generate_insights(
             )
 
     # Trading volume vs transactions divergence
-    tx_stats = analysis.get("ZLPTradingTransaction", {})
-    vol_stats = analysis.get("ZLPTradingVolume", {})
+    tx_stats = analysis.get("ZLPTransaction", {})
+    vol_stats = analysis.get("ZLPVolume", {})
     if tx_stats and vol_stats:
         tx_wow  = tx_stats.get("wow_pct")
         vol_wow = vol_stats.get("wow_pct")
@@ -149,7 +152,7 @@ def generate_insights(
                 )
 
     # Segment analysis
-    seg = analysis.get("ZLPTransactionbyusersegment", {})
+    seg = analysis.get("ZLPTransactionBySegment", {})
     if seg:
         wow = seg.get("wow_pct")
         if wow is not None and wow < -10:
@@ -167,10 +170,10 @@ def generate_insights(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Recommendation engine
+# Rule-based recommendation engine (fallback when the LLM is unavailable)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_recommendations(
+def _rule_based_recommendations(
     analysis:    Dict[str, Dict[str, Any]],
     bench_table: List[Dict[str, Any]],
 ) -> Dict[str, List[str]]:
@@ -232,7 +235,7 @@ def generate_recommendations(
     if au.get("trend") == "down":
         _c(1, "Segment churning users by last trading value. Deploy targeted win-back offers to top 30% of value at-risk users.")
 
-    seg = analysis.get("ZLPTransactionbyusersegment", {})
+    seg = analysis.get("ZLPTransactionBySegment", {})
     if seg.get("wow_pct") is not None and seg["wow_pct"] < -5:
         _c(2, "Send whale users (top 10% by GTGD) premium market intelligence briefings to reinforce platform value and prevent migration.")
 
@@ -247,3 +250,125 @@ def generate_recommendations(
         "Marketing": top(marketing, 3),
         "CRM":       top(crm,      4),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM-driven generation (primary) — Qwen via GreenNode AI Platform
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ANALYST_SYSTEM = (
+    "You are a senior business & equity analyst for ZaloPay's stock-trading "
+    "platform in Vietnam. You compare ZaloPay (ZLP) trading metrics against the "
+    "broader HOSE market and turn the numbers into sharp, decision-ready output "
+    "for Product, Marketing and CRM teams. You are precise, quantitative, and "
+    "never invent numbers that are not in the data. Respond with ONLY valid JSON "
+    "(no markdown fences, no prose)."
+)
+
+
+def _data_context(analysis, bench_table) -> str:
+    """Compact, JSON-serialisable snapshot of the analytics for the prompt."""
+    return json.dumps(
+        {"analysis": analysis, "benchmark_table": bench_table},
+        default=str,
+        ensure_ascii=False,
+    )
+
+
+def _llm_insights(analysis, bench_table) -> Optional[List[Dict[str, str]]]:
+    prompt = (
+        "Using the analytics JSON below, produce the TOP 5 strategic insights, "
+        "ordered most to least important. Each insight must be grounded in the "
+        "actual figures (cite WoW %, gaps, trends where relevant).\n\n"
+        "Return a JSON array of exactly up to 5 objects, each with string fields:\n"
+        '  "what"        - the observation (what happened, with numbers)\n'
+        '  "why"         - the likely driver / business reason\n'
+        '  "implication" - the strategic implication for ZaloPay\n\n'
+        "Return ONLY the JSON array.\n\n"
+        f"ANALYTICS DATA:\n{_data_context(analysis, bench_table)}"
+    )
+    parsed = llm_client.chat_json(
+        [{"role": "system", "content": _ANALYST_SYSTEM},
+         {"role": "user", "content": prompt}],
+        max_tokens=6000,
+    )
+    if not isinstance(parsed, list):
+        return None
+    cleaned = []
+    for item in parsed:
+        if isinstance(item, dict) and all(k in item for k in ("what", "why", "implication")):
+            cleaned.append({
+                "what": str(item["what"]),
+                "why": str(item["why"]),
+                "implication": str(item["implication"]),
+            })
+    return cleaned[:5] if cleaned else None
+
+
+def _llm_recommendations(analysis, bench_table) -> Optional[Dict[str, List[str]]]:
+    prompt = (
+        "Using the analytics JSON below, produce concrete, actionable "
+        "recommendations grouped by team. Each recommendation must be specific "
+        "and tied to the data.\n\n"
+        "Return a JSON object with exactly these keys, each a list of short "
+        "action strings:\n"
+        '  "Product"   - up to 4 actions\n'
+        '  "Marketing" - up to 3 actions\n'
+        '  "CRM"       - up to 4 actions\n\n'
+        "Return ONLY the JSON object.\n\n"
+        f"ANALYTICS DATA:\n{_data_context(analysis, bench_table)}"
+    )
+    parsed = llm_client.chat_json(
+        [{"role": "system", "content": _ANALYST_SYSTEM},
+         {"role": "user", "content": prompt}],
+        max_tokens=6000,
+    )
+    if not isinstance(parsed, dict):
+        return None
+    result = {}
+    caps = {"Product": 4, "Marketing": 3, "CRM": 4}
+    for team, cap in caps.items():
+        items = parsed.get(team)
+        if isinstance(items, list):
+            result[team] = [str(x) for x in items[:cap] if str(x).strip()]
+        else:
+            result[team] = []
+    return result if any(result.values()) else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API — LLM first, deterministic rule-based fallback
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_insights(
+    analysis:    Dict[str, Dict[str, Any]],
+    bench_table: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Top-5 insights. Generated by the LLM (Qwen); falls back to rules."""
+    if llm_client.is_configured():
+        try:
+            result = _llm_insights(analysis, bench_table)
+            if result:
+                logger.info("Insights generated by LLM (%d).", len(result))
+                return result
+            logger.warning("LLM insights unusable — falling back to rules.")
+        except Exception:  # noqa: BLE001
+            logger.exception("LLM insight generation errored — falling back to rules.")
+    return _rule_based_insights(analysis, bench_table)
+
+
+def generate_recommendations(
+    analysis:    Dict[str, Dict[str, Any]],
+    bench_table: List[Dict[str, Any]],
+) -> Dict[str, List[str]]:
+    """Team recommendations. Generated by the LLM (Qwen); falls back to rules."""
+    if llm_client.is_configured():
+        try:
+            result = _llm_recommendations(analysis, bench_table)
+            if result:
+                logger.info("Recommendations generated by LLM.")
+                return result
+            logger.warning("LLM recommendations unusable — falling back to rules.")
+        except Exception:  # noqa: BLE001
+            logger.exception("LLM recommendation generation errored — falling back to rules.")
+    return _rule_based_recommendations(analysis, bench_table)

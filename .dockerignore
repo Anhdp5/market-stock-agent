@@ -1,0 +1,32 @@
+# Secrets — never bake into the image (injected at runtime via --env-file)
+.env
+.env.template
+.greennode.json
+.agentbase/
+
+# Generated / local data
+data/
+# …but bundle the ZLP .msg source files so ZLP metrics are available at runtime
+!data/mock_data/
+!data/mock_data/**
+logs/
+reports/
+*.db
+*.db-journal
+__pycache__/
+*.pyc
+*.pyo
+
+# VCS & tooling
+.git/
+.gitignore
+*.bak
+greennode-agentbase-skills/
+
+# OS
+.DS_Store
+Thumbs.db
+
+.env.deploy
+.probe/
+.probe_tag.tmp

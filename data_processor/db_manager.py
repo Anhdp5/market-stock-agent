@@ -21,55 +21,85 @@ logger = logging.getLogger(__name__)
 
 DDL = """
 CREATE TABLE IF NOT EXISTS daily_market (
-    date                         TEXT PRIMARY KEY,   -- YYYY-MM-DD
-    -- Market (HOSE aggregate)
-    MarketTransaction            REAL,   -- total matched orders
-    MarketVolume                 REAL,   -- total matched volume (shares)
-    BuyVolume                    REAL,   -- total buy-side volume
-    SellVolume                   REAL,   -- total sell-side volume
-    -- ZaloPay internal
-    ZLPNewAccount                REAL,   -- new accounts opened (success)
-    ZLPTradingTransaction        REAL,   -- matched orders via ZaloPay
-    ZLPTradingVolume             REAL,   -- trading value via ZaloPay (VND)
-    ZLPActiveUsers               REAL,   -- active users (may be monthly)
-    ZLPTransactionbyusersegment  REAL,   -- total orders by segment (sum)
+    date                TEXT PRIMARY KEY,  -- YYYY-MM-DD
+    -- Market (HOSE aggregate) from CafeF PriceHistory
+    MarketVolume        REAL,  -- matched volume (shares)
+    MarketValue         REAL,  -- matched value (Billion VND)
+    BuyVolume           REAL,  -- buy-side volume
+    SellVolume          REAL,  -- sell-side volume
+    -- Market order counts from CafeF ThongKeDL
+    MarketOrderCount    REAL,
+    MarketBuyOrders     REAL,
+    MarketSellOrders    REAL,
+    -- ZaloPay internal metrics
+    ZLPNewAccount       REAL,  -- new accounts (ACTIVE statuses)
+    ZLPTransaction      REAL,  -- orders (sum of GTGD segment table)
+    ZLPValue            REAL,  -- GTGD trading value (Billion VND, est. from value buckets)
+    ZLPActiveUsers      REAL,  -- daily active users
+    ZLPActiveSellUsers  REAL,  -- daily active sell users
+    ZLPActiveBuyUsers   REAL,  -- daily active buy users
+    ZLPActiveUsersMonthly REAL, -- monthly active user (forward-filled)
     -- Metadata
-    updated_at                   TEXT DEFAULT (datetime('now'))
+    updated_at          TEXT DEFAULT (datetime('now'))
 );
 """
+
+# Columns to add if upgrading from old schema
+_MIGRATION_COLS = {
+    "MarketValue":          "REAL",
+    "MarketOrderCount":     "REAL",
+    "MarketBuyOrders":      "REAL",
+    "MarketSellOrders":     "REAL",
+    "ZLPTransaction":       "REAL",
+    "ZLPValue":             "REAL",
+    "ZLPActiveSellUsers":   "REAL",
+    "ZLPActiveBuyUsers":    "REAL",
+    "ZLPActiveUsersMonthly":"REAL",
+}
 
 UPSERT_SQL = """
 INSERT INTO daily_market (
     date,
-    MarketTransaction, MarketVolume, BuyVolume, SellVolume,
-    ZLPNewAccount, ZLPTradingTransaction, ZLPTradingVolume,
-    ZLPActiveUsers, ZLPTransactionbyusersegment,
+    MarketVolume, MarketValue, BuyVolume, SellVolume,
+    MarketOrderCount, MarketBuyOrders, MarketSellOrders,
+    ZLPNewAccount, ZLPTransaction, ZLPValue,
+    ZLPActiveUsers, ZLPActiveSellUsers, ZLPActiveBuyUsers,
+    ZLPActiveUsersMonthly,
     updated_at
 ) VALUES (
     :date,
-    :MarketTransaction, :MarketVolume, :BuyVolume, :SellVolume,
-    :ZLPNewAccount, :ZLPTradingTransaction, :ZLPTradingVolume,
-    :ZLPActiveUsers, :ZLPTransactionbyusersegment,
+    :MarketVolume, :MarketValue, :BuyVolume, :SellVolume,
+    :MarketOrderCount, :MarketBuyOrders, :MarketSellOrders,
+    :ZLPNewAccount, :ZLPTransaction, :ZLPValue,
+    :ZLPActiveUsers, :ZLPActiveSellUsers, :ZLPActiveBuyUsers,
+    :ZLPActiveUsersMonthly,
     datetime('now')
 )
 ON CONFLICT(date) DO UPDATE SET
-    MarketTransaction           = COALESCE(excluded.MarketTransaction, daily_market.MarketTransaction),
-    MarketVolume                = COALESCE(excluded.MarketVolume, daily_market.MarketVolume),
-    BuyVolume                   = COALESCE(excluded.BuyVolume, daily_market.BuyVolume),
-    SellVolume                  = COALESCE(excluded.SellVolume, daily_market.SellVolume),
-    ZLPNewAccount               = COALESCE(excluded.ZLPNewAccount, daily_market.ZLPNewAccount),
-    ZLPTradingTransaction       = COALESCE(excluded.ZLPTradingTransaction, daily_market.ZLPTradingTransaction),
-    ZLPTradingVolume            = COALESCE(excluded.ZLPTradingVolume, daily_market.ZLPTradingVolume),
-    ZLPActiveUsers              = COALESCE(excluded.ZLPActiveUsers, daily_market.ZLPActiveUsers),
-    ZLPTransactionbyusersegment = COALESCE(excluded.ZLPTransactionbyusersegment, daily_market.ZLPTransactionbyusersegment),
-    updated_at                  = datetime('now');
+    MarketVolume         = COALESCE(excluded.MarketVolume,        daily_market.MarketVolume),
+    MarketValue          = COALESCE(excluded.MarketValue,         daily_market.MarketValue),
+    BuyVolume            = COALESCE(excluded.BuyVolume,           daily_market.BuyVolume),
+    SellVolume           = COALESCE(excluded.SellVolume,          daily_market.SellVolume),
+    MarketOrderCount     = COALESCE(excluded.MarketOrderCount,    daily_market.MarketOrderCount),
+    MarketBuyOrders      = COALESCE(excluded.MarketBuyOrders,     daily_market.MarketBuyOrders),
+    MarketSellOrders     = COALESCE(excluded.MarketSellOrders,    daily_market.MarketSellOrders),
+    ZLPNewAccount        = COALESCE(excluded.ZLPNewAccount,       daily_market.ZLPNewAccount),
+    ZLPTransaction       = COALESCE(excluded.ZLPTransaction,      daily_market.ZLPTransaction),
+    ZLPValue             = COALESCE(excluded.ZLPValue,            daily_market.ZLPValue),
+    ZLPActiveUsers       = COALESCE(excluded.ZLPActiveUsers,      daily_market.ZLPActiveUsers),
+    ZLPActiveSellUsers   = COALESCE(excluded.ZLPActiveSellUsers,  daily_market.ZLPActiveSellUsers),
+    ZLPActiveBuyUsers    = COALESCE(excluded.ZLPActiveBuyUsers,   daily_market.ZLPActiveBuyUsers),
+    ZLPActiveUsersMonthly= COALESCE(excluded.ZLPActiveUsersMonthly, daily_market.ZLPActiveUsersMonthly),
+    updated_at           = datetime('now');
 """
 
 ALL_COLUMNS = [
     "date",
-    "MarketTransaction", "MarketVolume", "BuyVolume", "SellVolume",
-    "ZLPNewAccount", "ZLPTradingTransaction", "ZLPTradingVolume",
-    "ZLPActiveUsers", "ZLPTransactionbyusersegment",
+    "MarketVolume", "MarketValue", "BuyVolume", "SellVolume",
+    "MarketOrderCount", "MarketBuyOrders", "MarketSellOrders",
+    "ZLPNewAccount", "ZLPTransaction", "ZLPValue",
+    "ZLPActiveUsers", "ZLPActiveSellUsers", "ZLPActiveBuyUsers",
+    "ZLPActiveUsersMonthly",
 ]
 
 
@@ -88,6 +118,12 @@ class DBManager:
     def _init_db(self):
         with self._conn() as conn:
             conn.execute(DDL)
+            # Migrate: add any missing columns to existing DBs
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(daily_market)")}
+            for col, dtype in _MIGRATION_COLS.items():
+                if col not in existing:
+                    conn.execute(f"ALTER TABLE daily_market ADD COLUMN {col} {dtype}")
+                    logger.info(f"Migrated DB: added column {col}")
         logger.info(f"Database ready at {self.db_path}")
 
     # ── Write ──────────────────────────────────────────────────────────────
@@ -114,17 +150,20 @@ class DBManager:
 
     # ── Read ───────────────────────────────────────────────────────────────
 
+    def _safe_cols(self) -> str:
+        """Return SELECT clause using only columns that exist in the DB."""
+        with self._conn() as conn:
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(daily_market)")}
+        cols = [c for c in ALL_COLUMNS if c in existing]
+        return ", ".join(cols)
+
     def read_last_n_trading_days(self, n: int = 7) -> pd.DataFrame:
-        """
-        Return the last `n` rows that have at least one non-null value column,
-        ordered by date descending.
-        """
+        cols = self._safe_cols()
         sql = f"""
-            SELECT {', '.join(ALL_COLUMNS)}
+            SELECT {cols}
             FROM daily_market
             WHERE MarketVolume IS NOT NULL
-               OR ZLPTradingTransaction IS NOT NULL
-               OR ZLPTradingVolume IS NOT NULL
+               OR ZLPTransaction IS NOT NULL
             ORDER BY date DESC
             LIMIT {n}
         """
@@ -133,9 +172,9 @@ class DBManager:
         return df.sort_values("date").reset_index(drop=True)
 
     def read_range(self, start: str, end: str) -> pd.DataFrame:
-        """Read all rows between two ISO dates (inclusive)."""
+        cols = self._safe_cols()
         sql = f"""
-            SELECT {', '.join(ALL_COLUMNS)}
+            SELECT {cols}
             FROM daily_market
             WHERE date >= '{start}' AND date <= '{end}'
             ORDER BY date
@@ -145,7 +184,8 @@ class DBManager:
         return df.reset_index(drop=True)
 
     def read_all(self) -> pd.DataFrame:
-        sql = f"SELECT {', '.join(ALL_COLUMNS)} FROM daily_market ORDER BY date"
+        cols = self._safe_cols()
+        sql = f"SELECT {cols} FROM daily_market ORDER BY date"
         with self._conn() as conn:
             df = pd.read_sql_query(sql, conn, parse_dates=["date"])
         return df.reset_index(drop=True)

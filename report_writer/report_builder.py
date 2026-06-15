@@ -1,8 +1,15 @@
 """
 Report Builder
 ===============
-Assembles all analytical outputs into a polished HTML executive report
-and a plain-text version for email body.
+Assembles analytical outputs into an HTML executive report.
+
+Sections:
+  1. Executive Summary   — answers 3 strategic questions
+  2. Market Overview     — HOSE metrics + Buy/Sell pressure bar
+  3. ZaloPay Performance — ZLP metrics + Active Buy/Sell user bar
+  4. WoW Benchmark       — Market vs ZLP comparison table
+  5. Key Insights        — Ranked insight cards (what / why / implication)
+  6. Recommended Actions — Team-grouped action list
 """
 
 import sys, os
@@ -20,24 +27,48 @@ logger = logging.getLogger(__name__)
 REPORTS_DIR = config.REPORTS_DIR
 
 
+# ─── Formatters ──────────────────────────────────────────────────────────────
+
 def _fmt(val: Optional[float], unit: str = "", decimals: int = 1) -> str:
     if val is None:
         return "N/A"
     if unit == "B":
-        return f"{val/1e9:.{decimals}f}B"
+        return f"{val:.{decimals}f}B"
     if unit == "M":
         return f"{val/1e6:.{decimals}f}M"
+    if unit == "K":
+        return f"{val/1e3:.{decimals}f}K"
     if unit == "%":
         sign = "+" if val >= 0 else ""
         return f"{sign}{val:.{decimals}f}%"
+    if val >= 1_000_000:
+        return f"{val/1_000_000:.{decimals}f}M"
+    if val >= 1_000:
+        return f"{val/1_000:.{decimals}f}K"
     return f"{val:,.{decimals}f}"
 
 
-def _arrow(pct: Optional[float]) -> str:
-    if pct is None: return "–"
-    if pct > 0:     return f"▲ {pct:+.1f}%"
-    if pct < 0:     return f"▼ {pct:+.1f}%"
-    return f"→ {pct:+.1f}%"
+def _arrow(pct: Optional[float], decimals: int = 1) -> str:
+    if pct is None:
+        return "–"
+    if pct > 0:
+        return f'<span style="color:#16a34a;">▲ {pct:+.{decimals}f}%</span>'
+    if pct < 0:
+        return f'<span style="color:#dc2626;">▼ {pct:+.{decimals}f}%</span>'
+    return f'<span style="color:#6b7280;">→ {pct:+.{decimals}f}%</span>'
+
+
+def _arrow_text(pct: Optional[float]) -> str:
+    if pct is None:
+        return "–"
+    return f"{'▲' if pct > 0 else ('▼' if pct < 0 else '→')} {pct:+.1f}%"
+
+
+def _badge(text: str, color: str) -> str:
+    return (
+        f'<span style="background:{color};color:#fff;padding:2px 8px;'
+        f'border-radius:4px;font-size:11px;font-weight:700;">{text}</span>'
+    )
 
 
 def _assessment_badge(asmt: str) -> str:
@@ -50,142 +81,394 @@ def _assessment_badge(asmt: str) -> str:
         "Declining":    "#dc2626",
         "N/A":          "#6b7280",
     }
-    color = colors.get(asmt, "#6b7280")
-    return (
-        f'<span style="background:{color};color:#fff;padding:2px 8px;'
-        f'border-radius:4px;font-size:12px;font-weight:600;">{asmt}</span>'
+    return _badge(asmt, colors.get(asmt, "#6b7280"))
+
+
+def _trend_badge(trend: str) -> str:
+    colors = {"up": "#16a34a", "down": "#dc2626", "flat": "#d97706"}
+    symbols = {"up": "↑", "down": "↓", "flat": "→"}
+    color  = colors.get(trend, "#9ca3af")
+    symbol = symbols.get(trend, "?")
+    return f'<span style="color:{color};font-weight:700;">{symbol} {trend}</span>'
+
+
+# ─── Metric card ─────────────────────────────────────────────────────────────
+
+def _metric_card(title: str, stats: Dict[str, Any], unit: str = "") -> str:
+    d0    = _fmt(stats.get("d0"), unit)
+    d1pct = _arrow(stats.get("d0_vs_d1_pct"))
+    wow   = _arrow(stats.get("wow_pct"))
+    trend = stats.get("trend", "N/A")
+    trend_color = "#16a34a" if trend == "up" else ("#dc2626" if trend == "down" else "#6b7280")
+    avail = stats.get("available_days", 0)
+    avail_note = "" if avail >= 5 else f'<div style="font-size:10px;color:#f59e0b;">⚠ {avail}d data</div>'
+    return f"""
+    <td style="padding:12px;background:#f9fafb;border-radius:6px;
+               border:1px solid #e5e7eb;vertical-align:top;min-width:130px;">
+      <div style="font-size:11px;color:#6b7280;font-weight:600;
+                  text-transform:uppercase;margin-bottom:4px;">{title}</div>
+      <div style="font-size:18px;font-weight:700;color:#111827;margin-bottom:2px;">{d0}</div>
+      <div style="font-size:12px;color:#374151;margin-bottom:1px;">DoD: {d1pct}</div>
+      <div style="font-size:12px;color:#374151;margin-bottom:1px;">WoW: {wow}</div>
+      <div style="font-size:12px;color:{trend_color};font-weight:600;">
+        Trend: {trend}
+      </div>
+      {avail_note}
+    </td>"""
+
+
+# ─── Buy/Sell pressure bar ────────────────────────────────────────────────────
+
+def _buy_sell_bar(buy_val: Optional[float], sell_val: Optional[float],
+                  buy_label: str = "Buy", sell_label: str = "Sell") -> str:
+    """Horizontal stacked bar showing buy vs sell ratio."""
+    if buy_val is None or sell_val is None or (buy_val + sell_val) == 0:
+        return '<p style="color:#6b7280;font-size:13px;">Buy/Sell data not available.</p>'
+    total = buy_val + sell_val
+    buy_pct  = buy_val  / total * 100
+    sell_pct = sell_val / total * 100
+    return f"""
+    <div style="margin-top:12px;">
+      <div style="font-size:12px;color:#6b7280;margin-bottom:4px;font-weight:600;">
+        BUY / SELL PRESSURE
+      </div>
+      <div style="display:flex;height:20px;border-radius:4px;overflow:hidden;">
+        <div style="width:{buy_pct:.1f}%;background:#16a34a;"></div>
+        <div style="width:{sell_pct:.1f}%;background:#dc2626;"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;
+                  margin-top:4px;color:#374151;">
+        <span style="color:#16a34a;font-weight:600;">
+          {buy_label}: {_fmt(buy_val)} ({buy_pct:.1f}%)
+        </span>
+        <span style="color:#dc2626;font-weight:600;">
+          {sell_label}: {_fmt(sell_val)} ({sell_pct:.1f}%)
+        </span>
+      </div>
+    </div>"""
+
+
+# ─── Section builders ────────────────────────────────────────────────────────
+
+def _section_header(title: str) -> str:
+    return f"""
+    <h2 style="margin:0 0 14px;font-size:16px;color:#1e3a8a;
+               border-bottom:2px solid #e0e7ff;padding-bottom:8px;">{title}</h2>"""
+
+
+def _cmp_like(name: str, zlp_stats: Dict[str, Any], mkt_stats: Dict[str, Any]) -> str:
+    """Like-for-like WoW comparison (e.g. ZLP Orders vs Market Orders)."""
+    z = (zlp_stats or {}).get("wow_pct")
+    m = (mkt_stats or {}).get("wow_pct")
+    if z is None and m is None:
+        return f"<b>{name}:</b> insufficient WoW data."
+    if z is None:
+        return f"<b>{name}:</b> market {_arrow_text(m)} WoW; ZLP {name.lower()} data insufficient."
+    if m is None:
+        return f"<b>{name}:</b> ZLP {_arrow_text(z)} WoW; market {name.lower()} data insufficient."
+    gap = z - m
+    if gap > 2:
+        verdict = "outpacing the market"
+    elif gap < -2:
+        verdict = "lagging the market"
+    else:
+        verdict = "in line with the market"
+    return (f"<b>{name}:</b> ZaloPay {verdict} — ZLP {_arrow_text(z)} WoW vs "
+            f"market {_arrow_text(m)} ({gap:+.1f} pp).")
+
+
+def _build_exec_summary(
+    analysis:    Dict[str, Dict[str, Any]],
+    bench_table: List[Dict[str, Any]],
+) -> str:
+    """
+    Answers 3 strategic questions:
+      Q1: Is ZLP faster or slower than the market this week?
+      Q2: Is performance market-driven or internal (ZLP-specific)?
+      Q3: Which ZLP metrics are outperforming vs underperforming?
+    """
+    mkt_vol = analysis.get("MarketVolume", {})
+    zlp_tx  = analysis.get("ZLPTransaction", {})
+    zlp_au  = analysis.get("ZLPActiveUsers", {})
+    zlp_na  = analysis.get("ZLPNewAccount", {})
+
+    # Q1: like-for-like WoW vs market — Orders vs Orders, Value vs Value
+    q1_orders = _cmp_like("Orders",
+                          analysis.get("ZLPTransaction", {}),
+                          analysis.get("MarketOrderCount", {}))
+    q1_value  = _cmp_like("Value",
+                          analysis.get("ZLPValue", {}),
+                          analysis.get("MarketValue", {}))
+    q1 = q1_orders + "<br>" + q1_value
+
+    # Q2: Market-driven vs internal
+    mkt_trend = mkt_vol.get("trend", "insufficient_data")
+    au_trend  = zlp_au.get("trend", "insufficient_data")
+    if mkt_trend == au_trend and mkt_trend in ("up", "down"):
+        direction = "rising" if mkt_trend == "up" else "declining"
+        q2 = (f"Both market and ZLP active users are <b>trending {direction}</b>, "
+              "suggesting performance is primarily <b>macro-driven</b>. "
+              "ZLP is moving with the tide, not against it.")
+    elif mkt_trend in ("up", "down") and au_trend not in (mkt_trend, "insufficient_data"):
+        q2 = (f"Market is trending <b>{mkt_trend}</b> but ZLP active users are "
+              f"trending <b>{au_trend}</b>, indicating <b>platform-specific factors</b> "
+              "are diverging from macro conditions — investigate internal drivers.")
+    else:
+        q2 = "Trend data is limited; cannot definitively separate macro vs platform drivers."
+
+    # Q3: Which metrics outperform / underperform
+    outperform = [r["metric_label"] for r in bench_table if r.get("assessment") in ("Outperform", "Improving")]
+    underperform = [r["metric_label"] for r in bench_table if r.get("assessment") in ("Underperform", "Declining")]
+    stable = [r["metric_label"] for r in bench_table if r.get("assessment") in ("In Line", "Stable")]
+
+    def _join(lst):
+        return ", ".join(f"<b>{x}</b>" for x in lst) if lst else "none"
+
+    q3 = (f"Outperforming: {_join(outperform)}. "
+          f"Underperforming: {_join(underperform)}. "
+          f"In line: {_join(stable)}.")
+
+    bullets = [
+        ("Q1 — Speed vs Market", q1),
+        ("Q2 — Macro vs Internal", q2),
+        ("Q3 — Metric Scorecard", q3),
+    ]
+    items = ""
+    for label, text in bullets:
+        items += f"""
+        <li style="margin-bottom:10px;">
+          <span style="font-weight:700;color:#1e3a8a;">{label}:</span>
+          <span style="color:#374151;"> {text}</span>
+        </li>"""
+
+    return f"""
+    <tr><td style="padding:24px 32px 16px;">
+      {_section_header("1. Executive Summary")}
+      <ul style="margin:0;padding-left:18px;font-size:14px;line-height:1.7;">
+        {items}
+      </ul>
+    </td></tr>"""
+
+
+def _build_market_overview(analysis: Dict[str, Dict[str, Any]]) -> str:
+    mkt_vol  = analysis.get("MarketVolume",    {})
+    mkt_val  = analysis.get("MarketValue",     {})
+    buy_vol  = analysis.get("BuyVolume",       {})
+    sell_vol = analysis.get("SellVolume",      {})
+    ord_cnt  = analysis.get("MarketOrderCount",{})
+
+    cards = (
+        _metric_card("Volume (shares)",  mkt_vol) +
+        _metric_card("Value (B VND)",    mkt_val, "B") +
+        _metric_card("Orders",           ord_cnt)
     )
 
+    buy_sell = _buy_sell_bar(
+        buy_vol.get("d0"), sell_vol.get("d0"),
+        "Buy Vol", "Sell Vol"
+    )
 
-def build_html_report(
-    report_date:  date,
-    analysis:     Dict[str, Dict[str, Any]],
-    bench_table:  List[Dict[str, Any]],
-    insights:     List[Dict[str, str]],
-    recommendations: Dict[str, List[str]],
-) -> str:
-    """Generate a full HTML email report string."""
+    return f"""
+    <tr><td style="padding:8px 32px 16px;">
+      {_section_header("2. Market Overview (HOSE)")}
+      <table cellpadding="0" cellspacing="0"
+             style="border-collapse:separate;border-spacing:8px 0;">
+        <tr>{cards}</tr>
+      </table>
+      {buy_sell}
+    </td></tr>"""
 
-    # ── Executive Summary bullets ──────────────────────────────────────────
-    mkt_vol  = analysis.get("MarketVolume", {})
-    mkt_tx   = analysis.get("MarketTransaction", {})
-    zlp_tx   = analysis.get("ZLPTradingTransaction", {})
-    zlp_vol  = analysis.get("ZLPTradingVolume", {})
-    zlp_na   = analysis.get("ZLPNewAccount", {})
-    zlp_au   = analysis.get("ZLPActiveUsers", {})
 
-    tx_bench  = next((r for r in bench_table if r.get("mkt_key") == "MarketTransaction"), {})
-    vol_bench = next((r for r in bench_table if r.get("mkt_key") == "MarketVolume"), {})
+def _build_zlp_performance(analysis: Dict[str, Dict[str, Any]]) -> str:
+    zlp_na   = analysis.get("ZLPNewAccount",      {})
+    zlp_tx   = analysis.get("ZLPTransaction",     {})
+    zlp_val  = analysis.get("ZLPValue",           {})
+    zlp_au   = analysis.get("ZLPActiveUsers",     {})
+    zlp_sell = analysis.get("ZLPActiveSellUsers", {})
+    zlp_buy  = analysis.get("ZLPActiveBuyUsers",  {})
 
-    exec_bullets = []
-    if mkt_vol.get("d0_vs_d1_pct") is not None:
-        exec_bullets.append(
-            f"Market trading volume {_arrow(mkt_vol['d0_vs_d1_pct'])} DoD; "
-            f"7-day trend is <b>{mkt_vol.get('trend','N/A')}</b>."
-        )
-    if vol_bench.get("assessment") != "N/A":
-        gap = vol_bench.get('gap_pp')
-        asmt = vol_bench.get('assessment')
-        gap_str = f" ({gap:+.1f} pp)" if gap is not None else ""
-        exec_bullets.append(
-            f"ZaloPay trading value <b>{asmt}</b> vs market{gap_str} on a WoW basis."
-        )
-    if zlp_na.get("wow_pct") is not None:
-        exec_bullets.append(
-            f"New account openings: <b>{_arrow(zlp_na['wow_pct'])} WoW</b> — "
-            f"trend {zlp_na.get('trend','N/A')}."
-        )
-    if zlp_au.get("d0") is not None:
-        exec_bullets.append(
-            f"ZaloPay active users: <b>{_fmt(zlp_au['d0'], 'M', 2)}</b> "
-            f"(WoW {_arrow(zlp_au.get('wow_pct'))})."
-        )
-    if not exec_bullets:
-        exec_bullets.append("Insufficient data for full executive summary today.")
+    # Order: New Accounts -> Active Users -> Value (B VND) -> Orders
+    cards = (
+        _metric_card("New Accounts",  zlp_na) +
+        _metric_card("Active Users",  zlp_au) +
+        _metric_card("Value (B VND)", zlp_val, "B") +
+        _metric_card("Orders",        zlp_tx)
+    )
 
-    exec_html = "".join(f"<li>{b}</li>" for b in exec_bullets)
+    buy_sell = _buy_sell_bar(
+        zlp_buy.get("d0"), zlp_sell.get("d0"),
+        "Active Buy Users", "Active Sell Users"
+    )
 
-    # ── Benchmark table rows ───────────────────────────────────────────────
-    bench_rows_html = ""
+    return f"""
+    <tr><td style="padding:8px 32px 16px;">
+      {_section_header("3. ZaloPay Performance")}
+      <table cellpadding="0" cellspacing="0"
+             style="border-collapse:separate;border-spacing:8px 0;">
+        <tr>{cards}</tr>
+      </table>
+      {buy_sell}
+    </td></tr>"""
+
+
+def _build_wow_benchmark(bench_table: List[Dict[str, Any]]) -> str:
+    if not bench_table:
+        return f"""
+        <tr><td style="padding:8px 32px 16px;">
+          {_section_header("4. WoW Benchmark (Market vs ZaloPay)")}
+          <p style="color:#6b7280;font-size:14px;">
+            No benchmark data available. Ensure at least 2 weeks of .msg files are loaded.
+          </p>
+        </td></tr>"""
+
+    rows_html = ""
     for row in bench_table:
         mkt_g = _arrow(row.get("market_growth_pct"))
         zlp_g = _arrow(row.get("zlp_growth_pct")) if row.get("zlp_growth_pct") is not None else "–"
         gap   = f"{row['gap_pp']:+.1f} pp" if row.get("gap_pp") is not None else "–"
         asmt  = _assessment_badge(row.get("assessment", "N/A"))
+        narrative = row.get("narrative", "")
 
-        bench_rows_html += f"""
+        rows_html += f"""
         <tr>
-          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">{row['metric_label']}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:center;">{mkt_g}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:center;">{zlp_g}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:center;">{gap}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:center;">{asmt}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;
+                     font-weight:600;font-size:13px;">{row['metric_label']}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;
+                     text-align:center;">{mkt_g}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;
+                     text-align:center;">{zlp_g}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;
+                     text-align:center;">{gap}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;
+                     text-align:center;">{asmt}</td>
+        </tr>
+        <tr>
+          <td colspan="5" style="padding:4px 12px 10px;border-bottom:2px solid #e5e7eb;
+                                  font-size:12px;color:#6b7280;font-style:italic;">
+            {narrative}
+          </td>
         </tr>"""
 
-    # ── Insight blocks ─────────────────────────────────────────────────────
-    insights_html = ""
-    for i, ins in enumerate(insights, 1):
-        insights_html += f"""
-        <div style="margin-bottom:16px;padding:14px;background:#f8fafc;
-                    border-left:4px solid #1e40af;border-radius:4px;">
-          <p style="margin:0 0 4px;font-weight:600;color:#1e3a8a;">
-            {i}. {ins['what']}
+    return f"""
+    <tr><td style="padding:8px 32px 16px;">
+      {_section_header("4. WoW Benchmark (Market vs ZaloPay)")}
+      <p style="font-size:12px;color:#6b7280;margin:0 0 10px;">
+        WoW = avg of the last 5 trading days vs the prior 5 trading days
+        (a trading week is 5 days; weekends are not traded).
+        Gap = ZLP growth − Market growth (positive = ZLP outperforming).
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0"
+             style="border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="background:#eff6ff;">
+            <th style="padding:8px 12px;text-align:left;color:#1e3a8a;">Metric</th>
+            <th style="padding:8px 12px;text-align:center;color:#1e3a8a;">Market WoW</th>
+            <th style="padding:8px 12px;text-align:center;color:#1e3a8a;">ZLP WoW</th>
+            <th style="padding:8px 12px;text-align:center;color:#1e3a8a;">Gap</th>
+            <th style="padding:8px 12px;text-align:center;color:#1e3a8a;">Assessment</th>
+          </tr>
+        </thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+    </td></tr>"""
+
+
+def _build_insights(insights: List[Dict[str, str]]) -> str:
+    if not insights:
+        no_data = """
+        <p style="color:#6b7280;font-size:14px;">
+          No significant signals detected in the current data window.
+          This may indicate insufficient historical data (need ≥2 weeks) or
+          stable, in-line performance with no outliers to flag.
+        </p>"""
+        return f"""
+        <tr><td style="padding:8px 32px 16px;">
+          {_section_header("5. Key Insights")}
+          {no_data}
+        </td></tr>"""
+
+    cards = ""
+    priority_colors = ["#1e40af", "#7c3aed", "#0f766e", "#b45309", "#374151"]
+    for i, ins in enumerate(insights):
+        border_color = priority_colors[min(i, len(priority_colors)-1)]
+        cards += f"""
+        <div style="margin-bottom:14px;padding:14px;background:#f8fafc;
+                    border-left:4px solid {border_color};border-radius:4px;">
+          <p style="margin:0 0 6px;font-weight:700;color:#111827;font-size:14px;">
+            {i+1}. {ins['what']}
           </p>
-          <p style="margin:0 0 4px;color:#374151;">
+          <p style="margin:0 0 4px;color:#374151;font-size:13px;">
             <b>Why:</b> {ins['why']}
           </p>
-          <p style="margin:0;color:#374151;">
+          <p style="margin:0;color:#374151;font-size:13px;">
             <b>Implication:</b> {ins['implication']}
           </p>
         </div>"""
 
-    # ── Recommendation blocks ──────────────────────────────────────────────
-    rec_colors = {"Product": "#7c3aed", "Marketing": "#b45309", "CRM": "#0f766e"}
-    rec_html = ""
+    return f"""
+    <tr><td style="padding:8px 32px 16px;">
+      {_section_header("5. Key Insights")}
+      {cards}
+    </td></tr>"""
+
+
+def _build_recommendations(recommendations: Dict[str, List[str]]) -> str:
+    team_styles = {
+        "Product":   ("#7c3aed", "🛠"),
+        "Marketing": ("#b45309", "📣"),
+        "CRM":       ("#0f766e", "🔄"),
+    }
+    blocks = ""
     for team, items in recommendations.items():
-        color = rec_colors.get(team, "#374151")
-        items_html = "".join(f"<li style='margin-bottom:6px;'>{item}</li>" for item in items)
-        rec_html += f"""
-        <div style="margin-bottom:20px;">
-          <h4 style="margin:0 0 8px;color:{color};font-size:14px;text-transform:uppercase;
-                     letter-spacing:0.05em;">{team}</h4>
-          <ul style="margin:0;padding-left:20px;color:#374151;font-size:14px;">
-            {items_html}
-          </ul>
+        color, icon = team_styles.get(team, ("#374151", "•"))
+        items_html = ""
+        for item in items:
+            # Detect if item has a diagnostic path hint
+            diag_marker = "→" if "→" in item else ""
+            item_clean = item.replace("→", "<span style='color:#6b7280;'>→</span>")
+            items_html += f"""
+            <li style="margin-bottom:8px;font-size:13px;color:#374151;
+                       line-height:1.6;">{item_clean}</li>"""
+        blocks += f"""
+        <div style="margin-bottom:20px;padding:14px;background:#fafafa;
+                    border-radius:6px;border:1px solid #e5e7eb;">
+          <h4 style="margin:0 0 10px;color:{color};font-size:13px;
+                     text-transform:uppercase;letter-spacing:0.06em;
+                     font-weight:700;">{icon} {team}</h4>
+          <ul style="margin:0;padding-left:18px;">{items_html}</ul>
         </div>"""
 
-    # ── ZLP metric summary cards ───────────────────────────────────────────
-    def metric_card(title, stats, unit=""):
-        d0    = _fmt(stats.get("d0"), unit)
-        d1pct = _arrow(stats.get("d0_vs_d1_pct"))
-        wow   = _arrow(stats.get("wow_pct"))
-        trend = stats.get("trend", "N/A")
-        trend_color = "#16a34a" if trend == "up" else ("#dc2626" if trend == "down" else "#6b7280")
-        return f"""
-        <td style="padding:12px;background:#f9fafb;border-radius:6px;
-                   border:1px solid #e5e7eb;vertical-align:top;min-width:140px;">
-          <div style="font-size:11px;color:#6b7280;font-weight:600;
-                      text-transform:uppercase;margin-bottom:4px;">{title}</div>
-          <div style="font-size:20px;font-weight:700;color:#111827;margin-bottom:2px;">{d0}</div>
-          <div style="font-size:12px;color:#374151;">DoD: {d1pct}</div>
-          <div style="font-size:12px;color:#374151;">WoW: {wow}</div>
-          <div style="font-size:12px;color:{trend_color};font-weight:600;">
-            Trend: {trend}
-          </div>
-        </td>"""
+    return f"""
+    <tr><td style="padding:8px 32px 24px;">
+      {_section_header("6. Recommended Actions")}
+      {blocks}
+    </td></tr>"""
 
-    zlp_cards = (
-        metric_card("New Accounts",    zlp_na) +
-        metric_card("Orders (ZLP)",    zlp_tx) +
-        metric_card("Trading Value",   zlp_vol, "B") +
-        metric_card("Active Users",    zlp_au, "M")
-    )
-    mkt_cards = (
-        metric_card("Mkt Volume",   mkt_vol, "M") +
-        metric_card("Mkt Orders",   mkt_tx)
+
+# ─── Main builder ─────────────────────────────────────────────────────────────
+
+def build_html_report(
+    report_date:     date,
+    analysis:        Dict[str, Dict[str, Any]],
+    bench_table:     List[Dict[str, Any]],
+    insights:        List[Dict[str, str]],
+    recommendations: Dict[str, List[str]],
+) -> str:
+
+    exec_section  = _build_exec_summary(analysis, bench_table)
+    mkt_section   = _build_market_overview(analysis)
+    zlp_section   = _build_zlp_performance(analysis)
+
+    # Data availability note
+    avail_days = {k: v.get("available_days", 0) for k, v in analysis.items()}
+    max_days   = max(avail_days.values()) if avail_days else 0
+    data_note  = (
+        f'<span style="color:#16a34a;">✓ {max_days} trading days in analysis window.</span>'
+        if max_days >= 10 else
+        f'<span style="color:#f59e0b;">⚠ Only {max_days} trading days available. '
+        f'WoW benchmarks need ≥10 trading days (two trading weeks) for full accuracy.</span>'
     )
 
-    # ── Full HTML ──────────────────────────────────────────────────────────
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -198,7 +481,7 @@ def build_html_report(
 <table width="100%" cellpadding="0" cellspacing="0" bgcolor="#f1f5f9">
 <tr><td align="center" style="padding:24px 16px;">
 
-  <table width="640" cellpadding="0" cellspacing="0"
+  <table width="660" cellpadding="0" cellspacing="0"
          style="background:#ffffff;border-radius:8px;
                 box-shadow:0 1px 3px rgba(0,0,0,.1);">
 
@@ -208,106 +491,17 @@ def build_html_report(
         <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">
           📊 Daily Market Intelligence
         </h1>
-        <p style="margin:4px 0 0;color:#93c5fd;font-size:14px;">
-          Market vs ZaloPay Stock Performance · {report_date.strftime("%A, %d %B %Y")}
+        <p style="margin:6px 0 0;color:#93c5fd;font-size:13px;">
+          Market vs ZaloPay Stock Performance ·
+          {report_date.strftime("%A, %d %B %Y")}
         </p>
+        <p style="margin:4px 0 0;font-size:12px;">{data_note}</p>
       </td>
     </tr>
 
-    <!-- EXECUTIVE SUMMARY -->
-    <tr>
-      <td style="padding:24px 32px 16px;">
-        <h2 style="margin:0 0 12px;font-size:16px;color:#1e3a8a;
-                   border-bottom:2px solid #e0e7ff;padding-bottom:8px;">
-          Executive Summary
-        </h2>
-        <ul style="margin:0;padding-left:20px;color:#374151;
-                   font-size:14px;line-height:1.7;">
-          {exec_html}
-        </ul>
-      </td>
-    </tr>
-
-    <!-- MARKET OVERVIEW -->
-    <tr>
-      <td style="padding:8px 32px 16px;">
-        <h2 style="margin:0 0 12px;font-size:16px;color:#1e3a8a;
-                   border-bottom:2px solid #e0e7ff;padding-bottom:8px;">
-          Market Overview (HOSE)
-        </h2>
-        <table cellpadding="4" cellspacing="8" style="border-collapse:separate;
-               border-spacing:8px 0;">
-          <tr>{mkt_cards}</tr>
-        </table>
-      </td>
-    </tr>
-
-    <!-- ZLP PERFORMANCE -->
-    <tr>
-      <td style="padding:8px 32px 16px;">
-        <h2 style="margin:0 0 12px;font-size:16px;color:#1e3a8a;
-                   border-bottom:2px solid #e0e7ff;padding-bottom:8px;">
-          ZaloPay Performance
-        </h2>
-        <table cellpadding="4" cellspacing="8" style="border-collapse:separate;
-               border-spacing:8px 0;">
-          <tr>{zlp_cards}</tr>
-        </table>
-      </td>
-    </tr>
-
-    <!-- BENCHMARK TABLE -->
-    <tr>
-      <td style="padding:8px 32px 16px;">
-        <h2 style="margin:0 0 12px;font-size:16px;color:#1e3a8a;
-                   border-bottom:2px solid #e0e7ff;padding-bottom:8px;">
-          Market vs ZaloPay Benchmark (WoW)
-        </h2>
-        <table width="100%" cellpadding="0" cellspacing="0"
-               style="border-collapse:collapse;font-size:13px;">
-          <thead>
-            <tr style="background:#eff6ff;">
-              <th style="padding:8px 12px;text-align:left;color:#1e3a8a;
-                         font-weight:600;">Metric</th>
-              <th style="padding:8px 12px;text-align:center;color:#1e3a8a;
-                         font-weight:600;">Market Growth</th>
-              <th style="padding:8px 12px;text-align:center;color:#1e3a8a;
-                         font-weight:600;">ZLP Growth</th>
-              <th style="padding:8px 12px;text-align:center;color:#1e3a8a;
-                         font-weight:600;">Gap</th>
-              <th style="padding:8px 12px;text-align:center;color:#1e3a8a;
-                         font-weight:600;">Assessment</th>
-            </tr>
-          </thead>
-          <tbody>
-            {bench_rows_html}
-          </tbody>
-        </table>
-      </td>
-    </tr>
-
-    <!-- KEY INSIGHTS -->
-    <tr>
-      <td style="padding:8px 32px 16px;">
-        <h2 style="margin:0 0 12px;font-size:16px;color:#1e3a8a;
-                   border-bottom:2px solid #e0e7ff;padding-bottom:8px;">
-          Key Insights
-        </h2>
-        {insights_html if insights_html else
-         '<p style="color:#6b7280;font-size:14px;">Insufficient data for insights today.</p>'}
-      </td>
-    </tr>
-
-    <!-- RECOMMENDED ACTIONS -->
-    <tr>
-      <td style="padding:8px 32px 24px;">
-        <h2 style="margin:0 0 12px;font-size:16px;color:#1e3a8a;
-                   border-bottom:2px solid #e0e7ff;padding-bottom:8px;">
-          Recommended Actions
-        </h2>
-        {rec_html}
-      </td>
-    </tr>
+    {exec_section}
+    {mkt_section}
+    {zlp_section}
 
     <!-- FOOTER -->
     <tr>
@@ -315,7 +509,7 @@ def build_html_report(
                  border-top:1px solid #e5e7eb;border-radius:0 0 8px 8px;">
         <p style="margin:0;font-size:11px;color:#9ca3af;text-align:center;">
           Generated automatically by ZaloPay Stock Intelligence Agent ·
-          {report_date} · Data sources: CafeF (HOSE) · Outlook / DNSE Metabase
+          {report_date} · Data: CafeF (HOSE) + Metabase email exports
         </p>
       </td>
     </tr>
@@ -323,15 +517,88 @@ def build_html_report(
   </table>
 </td></tr>
 </table>
-
 </body>
 </html>"""
 
     return html
 
 
+def _summary_card(title: str, value: Optional[float], unit: str = "",
+                  sub: str = "") -> str:
+    sub_html = f'<div style="font-size:11px;color:#6b7280;margin-top:3px;">{sub}</div>' if sub else ""
+    return f"""
+    <td style="padding:14px;background:#f9fafb;border-radius:6px;
+               border:1px solid #e5e7eb;vertical-align:top;min-width:130px;">
+      <div style="font-size:11px;color:#6b7280;font-weight:600;
+                  text-transform:uppercase;margin-bottom:4px;">{title}</div>
+      <div style="font-size:20px;font-weight:700;color:#111827;">{_fmt(value, unit)}</div>
+      {sub_html}
+    </td>"""
+
+
+def build_accumulated_summary(start_date: date, end_date: date,
+                              df: "pd.DataFrame") -> str:
+    """
+    Accumulated view over [start_date, end_date]: flow metrics are SUMMED
+    (New Accounts, Orders, Value, Market Volume/Value/Orders); level metrics
+    (Active Users) are AVERAGED. `df` is the daily_market range from the DB.
+    """
+    def _sum(col):
+        if col not in df.columns:
+            return None
+        s = df[col].dropna()
+        return float(s.sum()) if not s.empty else None
+
+    def _avg(col):
+        if col not in df.columns:
+            return None
+        s = df[col].dropna()
+        return float(s.mean()) if not s.empty else None
+
+    n_days = int(df["date"].nunique()) if "date" in df.columns and not df.empty else 0
+
+    mkt_cards = (
+        _summary_card("Volume (shares)", _sum("MarketVolume")) +
+        _summary_card("Value (B VND)",   _sum("MarketValue"), "B") +
+        _summary_card("Orders",          _sum("MarketOrderCount"))
+    )
+    zlp_cards = (
+        _summary_card("New Accounts",  _sum("ZLPNewAccount")) +
+        _summary_card("Active Users",  _avg("ZLPActiveUsers"), sub="daily average") +
+        _summary_card("Value (B VND)", _sum("ZLPValue"), "B") +
+        _summary_card("Orders",        _sum("ZLPTransaction"))
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Accumulated Summary — {start_date} to {end_date}</title></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" bgcolor="#f1f5f9"><tr><td align="center" style="padding:24px 16px;">
+  <table width="660" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);">
+    <tr><td style="background:#1e3a8a;padding:24px 32px;border-radius:8px 8px 0 0;">
+      <h1 style="margin:0;color:#fff;font-size:20px;font-weight:700;">📊 Accumulated Summary</h1>
+      <p style="margin:6px 0 0;color:#93c5fd;font-size:13px;">
+        {start_date.strftime("%d %b %Y")} → {end_date.strftime("%d %b %Y")} ·
+        {n_days} trading day(s) · flow metrics summed, active users averaged</p>
+    </td></tr>
+    <tr><td style="padding:20px 32px 8px;">
+      {_section_header("Market (HOSE) — accumulated")}
+      <table cellpadding="0" cellspacing="0" style="border-collapse:separate;border-spacing:8px 0;"><tr>{mkt_cards}</tr></table>
+    </td></tr>
+    <tr><td style="padding:8px 32px 20px;">
+      {_section_header("ZaloPay — accumulated")}
+      <table cellpadding="0" cellspacing="0" style="border-collapse:separate;border-spacing:8px 0;"><tr>{zlp_cards}</tr></table>
+    </td></tr>
+    <tr><td style="padding:14px 32px;background:#f8fafc;border-top:1px solid #e5e7eb;border-radius:0 0 8px 8px;">
+      <p style="margin:0;font-size:11px;color:#9ca3af;text-align:center;">
+        Accumulated over {n_days} trading days · ZaloPay Stock Intelligence Agent</p>
+    </td></tr>
+  </table>
+</td></tr></table></body></html>"""
+
+
 def save_report(html: str, report_date: date) -> Path:
-    """Save the HTML report to disk and return the path."""
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"report_{report_date.strftime('%Y-%m-%d')}.html"
     path = REPORTS_DIR / filename
@@ -341,43 +608,26 @@ def save_report(html: str, report_date: date) -> Path:
 
 
 def build_plain_text_summary(
-    report_date:  date,
-    analysis:     Dict[str, Dict[str, Any]],
-    bench_table:  List[Dict[str, Any]],
-    insights:     List[Dict[str, str]],
+    report_date:     date,
+    analysis:        Dict[str, Dict[str, Any]],
+    bench_table:     List[Dict[str, Any]],
+    insights:        List[Dict[str, str]],
     recommendations: Dict[str, List[str]],
 ) -> str:
-    """Build a compact plain-text version of the report for email fallback."""
     lines = [
-        f"[Daily Market Intelligence] Market vs ZaloPay Stock — {report_date}",
+        f"[Daily Market Intelligence] Market vs ZaloPay — {report_date}",
         "=" * 65,
         "",
         "EXECUTIVE SUMMARY",
         "-" * 30,
     ]
 
-    for row in bench_table:
-        mkt_g = f"{row['market_growth_pct']:+.1f}%" if row.get("market_growth_pct") is not None else "N/A"
-        zlp_g = f"{row['zlp_growth_pct']:+.1f}%"    if row.get("zlp_growth_pct")    is not None else "N/A"
-        gap   = f"{row['gap_pp']:+.1f} pp"           if row.get("gap_pp")            is not None else "–"
-        lines.append(
-            f"  {row['metric_label']:<30} Mkt: {mkt_g:>7}  ZLP: {zlp_g:>7}  "
-            f"Gap: {gap:>7}  [{row['assessment']}]"
-        )
+    mkt_vol = analysis.get("MarketVolume", {})
+    zlp_tx  = analysis.get("ZLPTransaction", {})
+    if mkt_vol.get("wow_pct") is not None:
+        lines.append(f"  Market Volume WoW: {_arrow_text(mkt_vol['wow_pct'])}")
+    if zlp_tx.get("wow_pct") is not None:
+        lines.append(f"  ZLP Orders WoW:    {_arrow_text(zlp_tx['wow_pct'])}")
 
-    lines += ["", "KEY INSIGHTS", "-" * 30]
-    for i, ins in enumerate(insights, 1):
-        lines.append(f"{i}. {ins['what']}")
-        lines.append(f"   Why: {ins['why']}")
-        lines.append(f"   Action: {ins['implication']}")
-        lines.append("")
-
-    lines += ["RECOMMENDED ACTIONS", "-" * 30]
-    for team, items in recommendations.items():
-        lines.append(f"[{team.upper()}]")
-        for item in items:
-            lines.append(f"  • {item}")
-        lines.append("")
-
-    lines.append(f"─ ZaloPay Stock Intelligence Agent · {report_date} ─")
+    lines += ["", f"─ ZaloPay Stock Intelligence Agent · {report_date} ─"]
     return "\n".join(lines)
