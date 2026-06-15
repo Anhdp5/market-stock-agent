@@ -143,15 +143,39 @@ def health_check() -> PingStatus:
     return PingStatus.HEALTHY
 
 
-# ── Custom GET /report route (browser-friendly) ─────────────────────────────
+# ── Custom GET /report route (browser-friendly, auto-regenerates) ───────────
+def _wait_page(target_date, busy):
+    note = ("A run is in progress — your report will appear automatically."
+            if busy else
+            "Generating the report now (scrape → analyse → Qwen → build, ~2–3 min).")
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="6">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Generating report — {target_date}</title></head>
+<body style="margin:0;font-family:'Segoe UI',Arial,sans-serif;background:#eef3fb;color:#0b1f3a">
+<div style="max-width:520px;margin:64px auto;background:#fff;border:1px solid #e3eaf5;border-radius:16px;
+            padding:30px;text-align:center;box-shadow:0 6px 24px rgba(16,42,90,.06)">
+  <div style="width:46px;height:46px;border:4px solid #cfe0ff;border-top-color:#0068ff;border-radius:50%;
+              margin:0 auto 18px;animation:s 0.9s linear infinite"></div>
+  <h2 style="margin:0 0 6px;color:#0068ff;font-size:18px">Generating report for {target_date}</h2>
+  <p style="margin:0;color:#5b6b85;font-size:14px">{note}</p>
+  <p style="margin:14px 0 0;color:#9aa7bd;font-size:12px">This page refreshes automatically.</p>
+</div>
+<style>@keyframes s{{to{{transform:rotate(360deg)}}}}</style>
+</body></html>"""
+
+
 async def report_route(request):
     date_str = request.query_params.get("date")
     p = _find_report(date_str)
-    if not p:
-        return PlainTextResponse(
-            "No report found. Run the pipeline first via POST /invocations.",
-            status_code=404)
-    return HTMLResponse(p.read_text(encoding="utf-8"))
+    if p:
+        return HTMLResponse(p.read_text(encoding="utf-8"))
+    # Missing: kick off generation for this date (single-flight), show a
+    # self-refreshing waiting page that swaps in the report once it's ready.
+    target = date_str or date.today().isoformat()
+    ack = _trigger({"date": target, "dry_run": True, "force": True})
+    busy = ack.get("status") == "busy"
+    return HTMLResponse(_wait_page(target, busy), status_code=200)
 
 
 app.add_route("/report", report_route, methods=["GET"])
@@ -259,12 +283,10 @@ async function refresh(){
     if(lr.state==='succeeded'||lr.state==='failed'){clearInterval(pollTimer);$('runbtn').disabled=false;if(lr.state==='succeeded')loadReport();}
   }catch(e){}
 }
-async function loadReport(){
+function loadReport(){
   const d=dateVal();const url='/report'+(d?('?date='+encodeURIComponent(d)):'');
-  try{const r=await fetch(url);if(!r.ok){$('empty').innerHTML='No report for this date yet. Run the pipeline first.';return;}
-    const html=await r.text();const f=$('rep');f.srcdoc=html;f.style.display='block';$('empty').style.display='none';
-    const o=$('open');o.href=url;o.style.display='inline';
-  }catch(e){$('empty').textContent='Could not load report: '+e;}
+  const f=$('rep');f.src=url;f.style.display='block';$('empty').style.display='none';
+  const o=$('open');o.href=url;o.style.display='inline';
 }
 // init: default date = today, check health, load latest report if any
 (function(){const t=new Date();$('date').value=t.toISOString().slice(0,10);health();setInterval(health,15000);refresh();})();
