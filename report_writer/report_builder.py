@@ -518,6 +518,81 @@ def build_html_report(
     return html
 
 
+def _summary_card(title: str, value: Optional[float], unit: str = "",
+                  sub: str = "") -> str:
+    sub_html = f'<div style="font-size:11px;color:#6b7280;margin-top:3px;">{sub}</div>' if sub else ""
+    return f"""
+    <td style="padding:14px;background:#f9fafb;border-radius:6px;
+               border:1px solid #e5e7eb;vertical-align:top;min-width:130px;">
+      <div style="font-size:11px;color:#6b7280;font-weight:600;
+                  text-transform:uppercase;margin-bottom:4px;">{title}</div>
+      <div style="font-size:20px;font-weight:700;color:#111827;">{_fmt(value, unit)}</div>
+      {sub_html}
+    </td>"""
+
+
+def build_accumulated_summary(start_date: date, end_date: date,
+                              df: "pd.DataFrame") -> str:
+    """
+    Accumulated view over [start_date, end_date]: flow metrics are SUMMED
+    (New Accounts, Orders, Value, Market Volume/Value/Orders); level metrics
+    (Active Users) are AVERAGED. `df` is the daily_market range from the DB.
+    """
+    def _sum(col):
+        if col not in df.columns:
+            return None
+        s = df[col].dropna()
+        return float(s.sum()) if not s.empty else None
+
+    def _avg(col):
+        if col not in df.columns:
+            return None
+        s = df[col].dropna()
+        return float(s.mean()) if not s.empty else None
+
+    n_days = int(df["date"].nunique()) if "date" in df.columns and not df.empty else 0
+
+    mkt_cards = (
+        _summary_card("Volume (shares)", _sum("MarketVolume")) +
+        _summary_card("Value (B VND)",   _sum("MarketValue"), "B") +
+        _summary_card("Orders",          _sum("MarketOrderCount"))
+    )
+    zlp_cards = (
+        _summary_card("New Accounts",  _sum("ZLPNewAccount")) +
+        _summary_card("Active Users",  _avg("ZLPActiveUsers"), sub="daily average") +
+        _summary_card("Value (B VND)", _sum("ZLPValue"), "B") +
+        _summary_card("Orders",        _sum("ZLPTransaction"))
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Accumulated Summary — {start_date} to {end_date}</title></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" bgcolor="#f1f5f9"><tr><td align="center" style="padding:24px 16px;">
+  <table width="660" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);">
+    <tr><td style="background:#1e3a8a;padding:24px 32px;border-radius:8px 8px 0 0;">
+      <h1 style="margin:0;color:#fff;font-size:20px;font-weight:700;">📊 Accumulated Summary</h1>
+      <p style="margin:6px 0 0;color:#93c5fd;font-size:13px;">
+        {start_date.strftime("%d %b %Y")} → {end_date.strftime("%d %b %Y")} ·
+        {n_days} trading day(s) · flow metrics summed, active users averaged</p>
+    </td></tr>
+    <tr><td style="padding:20px 32px 8px;">
+      {_section_header("Market (HOSE) — accumulated")}
+      <table cellpadding="0" cellspacing="0" style="border-collapse:separate;border-spacing:8px 0;"><tr>{mkt_cards}</tr></table>
+    </td></tr>
+    <tr><td style="padding:8px 32px 20px;">
+      {_section_header("ZaloPay — accumulated")}
+      <table cellpadding="0" cellspacing="0" style="border-collapse:separate;border-spacing:8px 0;"><tr>{zlp_cards}</tr></table>
+    </td></tr>
+    <tr><td style="padding:14px 32px;background:#f8fafc;border-top:1px solid #e5e7eb;border-radius:0 0 8px 8px;">
+      <p style="margin:0;font-size:11px;color:#9ca3af;text-align:center;">
+        Accumulated over {n_days} trading days · ZaloPay Stock Intelligence Agent</p>
+    </td></tr>
+  </table>
+</td></tr></table></body></html>"""
+
+
 def save_report(html: str, report_date: date) -> Path:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"report_{report_date.strftime('%Y-%m-%d')}.html"

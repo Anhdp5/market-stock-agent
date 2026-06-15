@@ -181,6 +181,42 @@ async def report_route(request):
 app.add_route("/report", report_route, methods=["GET"])
 
 
+# ── GET /summary — accumulated totals over a window ─────────────────────────
+async def summary_route(request):
+    import config
+    from datetime import timedelta
+    from data_processor.db_manager import DBManager
+    from report_writer.report_builder import build_accumulated_summary
+
+    q = request.query_params
+    db = DBManager()
+
+    if q.get("to"):
+        end = _parse_date(q["to"])
+    else:
+        ld = db.latest_date()
+        end = _parse_date(ld) if ld else date.today()
+    if q.get("from"):
+        start = _parse_date(q["from"])
+    else:
+        try:
+            days = max(1, int(q.get("days", "7")))
+        except ValueError:
+            days = 7
+        start = end - timedelta(days=days - 1)
+
+    df = db.read_range(start.isoformat(), end.isoformat())
+    if df is None or df.empty:
+        # No data yet (fresh container) — populate via a run, show waiting page.
+        ack = _trigger({"date": end.isoformat(), "dry_run": True, "force": True})
+        return HTMLResponse(_wait_page(f"{start} → {end}",
+                                       ack.get("status") == "busy"))
+    return HTMLResponse(build_accumulated_summary(start, end, df))
+
+
+app.add_route("/summary", summary_route, methods=["GET"])
+
+
 # ── Browser landing page at GET / ───────────────────────────────────────────
 _INDEX_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -243,6 +279,14 @@ _INDEX_HTML = """<!DOCTYPE html>
     <div class="row"><label class="switch"><input type="checkbox" id="force" checked><span class="sl"></span></label> Force <span style="color:var(--mut);font-weight:400">(run on holidays/weekends)</span></div>
     <button class="btn primary" id="runbtn" onclick="run()">▶  Run pipeline</button>
     <div class="btns2"><button class="btn ghost" onclick="refresh()">↻ Status</button><button class="btn ghost" onclick="loadReport()">📄 View report</button></div>
+    <label>Accumulate over</label>
+    <select id="period" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:14px;background:#fbfdff">
+      <option value="5">Last 5 days</option>
+      <option value="7" selected>Last 7 days</option>
+      <option value="14">Last 14 days</option>
+      <option value="30">Last 30 days</option>
+    </select>
+    <button class="btn ghost" style="margin-top:10px" onclick="loadSummary()">Σ  Accumulated summary</button>
     <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
     <div class="status"><div class="spin" id="spin"></div><span class="pill idle" id="pill">idle</span></div>
     <div class="meta" id="meta">No run yet. Pick a date and press <b>Run pipeline</b>.</div>
@@ -285,6 +329,11 @@ async function refresh(){
 }
 function loadReport(){
   const d=dateVal();const url='/report'+(d?('?date='+encodeURIComponent(d)):'');
+  const f=$('rep');f.src=url;f.style.display='block';$('empty').style.display='none';
+  const o=$('open');o.href=url;o.style.display='inline';
+}
+function loadSummary(){
+  const url='/summary?days='+encodeURIComponent($('period').value);
   const f=$('rep');f.src=url;f.style.display='block';$('empty').style.display='none';
   const o=$('open');o.href=url;o.style.display='inline';
 }
